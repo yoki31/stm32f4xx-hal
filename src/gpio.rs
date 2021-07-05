@@ -9,6 +9,7 @@ use crate::pac::EXTI;
 use crate::syscfg::SysCfg;
 
 mod convert;
+pub mod unproven;
 
 /// Extension trait to split a GPIO peripheral in independent pins and registers
 pub trait GpioExt {
