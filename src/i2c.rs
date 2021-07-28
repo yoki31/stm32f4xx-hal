@@ -79,6 +79,8 @@ where
 pub struct I2c<I2C: Instance, PINS> {
     i2c: I2C,
     pins: PINS,
+    mode: Mode,
+    clk: Hertz,
 }
 
 pub trait Pins<I2c> {}
@@ -284,8 +286,13 @@ where
             I2C::reset(rcc);
         }
 
-        let i2c = I2c { i2c, pins };
-        i2c.i2c_init(mode, clocks.pclk1());
+        let i2c = I2c {
+            i2c,
+            pins,
+            mode: mode.into(),
+            clk: clocks.pclk1(),
+        };
+        i2c.init();
         i2c
     }
 }
@@ -294,13 +301,14 @@ impl<I2C, PINS> I2c<I2C, PINS>
 where
     I2C: Instance,
 {
-    fn i2c_init<M: Into<Mode>>(&self, mode: M, pclk: Hertz) {
-        let mode = mode.into();
+    /// Initializes I2C. Configures the `I2C_TRISE`, `I2C_CRX`, and `I2C_CCR` registers
+    /// according to the system frequency and I2C mode.
+    fn init(&self) {
         // Make sure the I2C unit is disabled so we can configure it
         self.i2c.cr1.modify(|_, w| w.pe().clear_bit());
 
         // Calculate settings for I2C speed modes
-        let clock = pclk.0;
+        let clock = self.clk.0;
         let clc_mhz = clock / 1_000_000;
         assert!((2..=50).contains(&clc_mhz));
 
@@ -309,7 +317,7 @@ where
             .cr2
             .write(|w| unsafe { w.freq().bits(clc_mhz as u8) });
 
-        let trise = match mode {
+        let trise = match self.mode {
             Mode::Standard { .. } => clc_mhz + 1,
             Mode::Fast { .. } => clc_mhz * 300 / 1000 + 1,
         };
@@ -317,7 +325,7 @@ where
         // Configure correct rise times
         self.i2c.trise.write(|w| w.trise().bits(trise as u8));
 
-        match mode {
+        match &self.mode {
             // I2C clock control calculation
             Mode::Standard { frequency } => {
                 let ccr = (clock / (frequency.0 * 2)).max(4);

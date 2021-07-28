@@ -11,6 +11,7 @@ use crate::time::{Hertz, U32Ext};
 pub struct FMPI2c<I2C, PINS> {
     i2c: I2C,
     pins: PINS,
+    mode: FmpMode,
 }
 
 #[derive(Debug, PartialEq)]
@@ -94,8 +95,12 @@ where
             rcc.dckcfgr2.modify(|_, w| w.fmpi2c1sel().hsi());
         }
 
-        let i2c = FMPI2c { i2c, pins };
-        i2c.i2c_init(mode);
+        let i2c = FMPI2c {
+            i2c,
+            pins,
+            mode: mode.into(),
+        };
+        i2c.init();
         i2c
     }
 }
@@ -104,8 +109,7 @@ impl<I2C, PINS> FMPI2c<I2C, PINS>
 where
     I2C: Deref<Target = fmpi2c1::RegisterBlock>,
 {
-    fn i2c_init<M: Into<FmpMode>>(&self, mode: M) {
-        let mode = mode.into();
+    fn init(&self) {
         use core::cmp;
 
         // Make sure the I2C unit is disabled so we can configure it
@@ -123,7 +127,7 @@ where
 
         // Normal I2C speeds use a different scaling than fast mode below and fast mode+ even more
         // below
-        match mode {
+        match self.mode {
             FmpMode::Standard { frequency } => {
                 presc = 3;
                 scll = cmp::max((((FREQ >> presc) >> 1) / frequency.0) - 1, 255) as u8;
