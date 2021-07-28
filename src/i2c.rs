@@ -406,6 +406,32 @@ where
         Ok(sr1)
     }
 
+    /// Perform an I2C software reset
+    fn reset(&mut self) {
+        self.i2c.cr1.write(|w| w.pe().set_bit().swrst().set_bit());
+        self.i2c.cr1.reset();
+        self.init();
+    }
+
+    /// Generate START condition
+    fn send_start(&mut self) {
+        self.i2c.cr1.modify(|_, w| w.start().set_bit());
+    }
+
+    /// Sends the (7-Bit) address on the I2C bus. The 8th bit on the bus is set
+    /// depending on wether it is a read or write transfer.
+    fn send_addr(&self, addr: u8, read: bool) {
+        self.i2c
+            .dr
+            .write(|w| w.dr().bits(addr << 1 | (if read { 1 } else { 0 })));
+    }
+
+    /// Generate STOP condition
+    fn send_stop(&self) {
+        self.i2c.cr1.modify(|_, w| w.stop().set_bit());
+    }
+
+
     pub fn release(self) -> (I2C, PINS) {
         (self.i2c, self.pins)
     }
@@ -425,7 +451,7 @@ where
 {
     fn write_bytes(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
         // Send a START condition
-        self.i2c.cr1.modify(|_, w| w.start().set_bit());
+        self.send_start();
 
         // Wait until START condition was generated
         while self.check_and_clear_error_flags()?.sb().bit_is_clear() {}
@@ -439,9 +465,7 @@ where
         } {}
 
         // Set up current address, we're trying to talk to
-        self.i2c
-            .dr
-            .write(|w| unsafe { w.bits(u32::from(addr) << 1) });
+        self.send_addr(addr, false);
 
         // Wait until address was sent
         while {
@@ -472,7 +496,7 @@ where
         } {}
 
         // Push out a byte of data
-        self.i2c.dr.write(|w| unsafe { w.bits(u32::from(byte)) });
+        self.i2c.dr.write(|w| w.dr.bits(byte));
 
         // Wait until byte is transferred
         while {
@@ -491,7 +515,7 @@ where
             self.i2c.sr1.read().rx_ne().bit_is_clear()
         } {}
 
-        let value = self.i2c.dr.read().bits() as u8;
+        let value = self.i2c.dr.read().dr().bits();
         Ok(value)
     }
 }
@@ -520,7 +544,7 @@ where
         self.write_bytes(addr, bytes)?;
 
         // Send a STOP condition
-        self.i2c.cr1.modify(|_, w| w.stop().set_bit());
+        self.send_stop();
 
         // Wait for STOP condition to transmit.
         while self.i2c.cr1.read().stop().bit_is_set() {}
@@ -553,9 +577,7 @@ where
             } {}
 
             // Set up current address, we're trying to talk to
-            self.i2c
-                .dr
-                .write(|w| unsafe { w.bits((u32::from(addr) << 1) + 1) });
+            self.send_addr(addr, true);
 
             // Wait until address was sent
             while {
