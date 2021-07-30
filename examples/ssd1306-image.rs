@@ -21,7 +21,7 @@ use cortex_m_rt::{entry, exception};
 use embedded_graphics::{image::Image, image::ImageRaw, pixelcolor::BinaryColor, prelude::*};
 use ssd1306::{prelude::*, Builder, I2CDIBuilder};
 
-use crate::hal::{i2c::I2c, pac, prelude::*};
+use crate::hal::{gpio::PinState, i2c::I2c, pac, prelude::*};
 
 #[entry]
 fn main() -> ! {
@@ -36,20 +36,31 @@ fn main() -> ! {
         // Set up I2C - SCL is PB8 and SDA is PB9; they are set to Alternate Function 4
         // as per the STM32F446xC/E datasheet page 60. Pin assignment as per the Nucleo-F446 board.
         let gpiob = dp.GPIOB.split();
-        let scl = gpiob.pb8.into_alternate().set_open_drain();
-        let sda = gpiob.pb9.into_alternate().set_open_drain();
+        let scl = gpiob
+            .pb8
+            .into_alternate()
+            .internal_pull_up(true)
+            .set_open_drain();
+        let sda = gpiob
+            .pb9
+            .into_alternate()
+            .internal_pull_up(true)
+            .set_open_drain();
         let i2c = I2c::new(dp.I2C1, (scl, sda), 400.khz(), clocks);
 
         // There's a button on PC13. On the Nucleo board, it's pulled up by a 4.7kOhm resistor
         // and therefore is active LOW. There's even a 100nF capacitor for debouncing - nice for us
         // since otherwise we'd have to debounce in software.
         let gpioc = dp.GPIOC.split();
-        let btn = gpioc.pc13.into_pull_down_input();
+        let btn = gpiob.pb10.into_pull_down_input();
 
+        let mut led = gpioc.pc13.into_push_pull_output_in_state(PinState::High);
         // Set up the display
         let interface = I2CDIBuilder::new().init(i2c);
         let mut disp: GraphicsMode<_, _> = Builder::new().connect(interface).into();
         disp.init().unwrap();
+
+        led.set_low();
         disp.flush().unwrap();
 
         // Display the rustacean

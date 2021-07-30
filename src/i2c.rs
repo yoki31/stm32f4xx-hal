@@ -2,7 +2,7 @@ use core::ops::Deref;
 use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
 
 use crate::pac::i2c1;
-use crate::rcc::{Enable, Reset};
+use crate::rcc::{Enable, GetBusFreq, Reset};
 
 #[cfg(feature = "i2c3")]
 use crate::pac::I2C3;
@@ -262,7 +262,10 @@ pub enum Error {
     ARBITRATION,
 }
 
-pub trait Instance: crate::Sealed + Deref<Target = i2c1::RegisterBlock> + Enable + Reset {}
+pub trait Instance:
+    crate::Sealed + Deref<Target = i2c1::RegisterBlock> + Enable + Reset + GetBusFreq
+{
+}
 
 impl Instance for I2C1 {}
 impl Instance for I2C2 {}
@@ -290,7 +293,7 @@ where
             i2c,
             pins,
             mode: mode.into(),
-            clk: clocks.pclk1(),
+            clk: I2C::get_frequency(&clocks),
         };
         i2c.init();
         i2c
@@ -431,6 +434,15 @@ where
         self.i2c.cr1.modify(|_, w| w.stop().set_bit());
     }
 
+    fn send_start_and_wait(&mut self) -> Result<(), Error> {
+        // Send a START condition
+        self.send_start();
+
+        // Wait until START condition was generated
+        while self.check_and_clear_error_flags()?.sb().bit_is_clear() {}
+
+        Ok(())
+    }
 
     pub fn release(self) -> (I2C, PINS) {
         (self.i2c, self.pins)
@@ -450,11 +462,7 @@ where
     I2C: Instance,
 {
     fn write_bytes(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
-        // Send a START condition
-        self.send_start();
-
-        // Wait until START condition was generated
-        while self.check_and_clear_error_flags()?.sb().bit_is_clear() {}
+        self.send_start_and_wait()?;
 
         // Also wait until signalled we're master and everything is waiting for us
         while {
@@ -496,7 +504,7 @@ where
         } {}
 
         // Push out a byte of data
-        self.i2c.dr.write(|w| w.dr.bits(byte));
+        self.i2c.dr.write(|w| w.dr().bits(byte));
 
         // Wait until byte is transferred
         while {
