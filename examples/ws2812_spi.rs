@@ -1,4 +1,3 @@
-#![deny(warnings)]
 #![deny(unsafe_code)]
 #![no_main]
 #![no_std]
@@ -8,8 +7,8 @@ use stm32f4xx_hal as hal;
 
 use cortex_m_rt::entry;
 use hal::{gpio::NoPin, pac, prelude::*, spi::Spi};
-use smart_leds::{SmartLedsWrite,
-    hsv::{hsv2rgb, Hsv},
+use smart_leds::{SmartLedsWrite, brightness,
+    hsv::{hsv2rgb, Hsv, RGB8},
 };
 use ws2812_spi as ws2812;
 
@@ -20,7 +19,7 @@ fn main() -> ! {
 
     // Configure APB bus clock to 48MHz, cause ws2812 requires 3Mbps SPI
     let rcc = dp.RCC.constrain();
-    let clocks = rcc.cfgr.sysclk(48.mhz()).freeze();
+    let clocks = rcc.cfgr.sysclk(56.mhz()).freeze();
 
     let mut delay = hal::delay::Delay::new(cp.SYST, &clocks);
     let gpioa = dp.GPIOA.split();
@@ -29,9 +28,9 @@ fn main() -> ! {
 
     let spi = Spi::new(
         dp.SPI1,
-        (NoPin, NoPin, gpioa.pa7),
+        (gpioa.pa5, NoPin, gpioa.pa7),
         ws2812::MODE,
-        3.mhz(),
+        3500.khz(),
         clocks,
     );
     // Holds the colour values
@@ -39,21 +38,30 @@ fn main() -> ! {
     let mut ws = ws2812::Ws2812::new(spi);
 
     const NUM_LEDS: usize = 8;
-    const BRIGHTNESS: u8 = 50;
-    const SATURATION: u8 = 255;
-    let mut leds: [Hsv; NUM_LEDS] = [ Hsv{hue: 0, sat: 0, val: 0}; NUM_LEDS ];
+    let mut data = [RGB8::default(); NUM_LEDS];
+
     loop {
-        
-      for _j in 0..8 {
-        for i in 0..NUM_LEDS {
-          leds[i] = Hsv{hue: ((i * 32) as u8) + 32, sat: SATURATION, val: BRIGHTNESS};
-          /* The higher the value 4 the less fade there is and vice versa */ 
+        for j in 0..(256 * 5) {
+            for i in 0..NUM_LEDS {
+                data[i] = wheel((((i * 256) as u16 / NUM_LEDS as u16 + j as u16) & 255) as u8);
+            }
+            ws.write(brightness(data.iter().cloned(), 32)).unwrap();
+            delay.delay_ms(5u8);
         }
-        let rgb_iterator = leds.iter().cloned().map(hsv2rgb);
-        ws.write(rgb_iterator).unwrap();
-        delay.delay_ms(200_u16); /* Change this to your hearts desire, the lower the value the faster your colors move (and vice versa) */
-        pc13.toggle();
-      }
-        
     }
+}
+
+/// Input a value 0 to 255 to get a color value
+/// The colours are a transition r - g - b - back to r.
+fn wheel(mut wheel_pos: u8) -> RGB8 {
+    wheel_pos = 255 - wheel_pos;
+    if wheel_pos < 85 {
+        return (255 - wheel_pos * 3, 0, wheel_pos * 3).into();
+    }
+    if wheel_pos < 170 {
+        wheel_pos -= 85;
+        return (0, wheel_pos * 3, 255 - wheel_pos * 3).into();
+    }
+    wheel_pos -= 170;
+    (wheel_pos * 3, 255 - wheel_pos * 3, 0).into()
 }
