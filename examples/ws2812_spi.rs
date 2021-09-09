@@ -8,7 +8,9 @@ use stm32f4xx_hal as hal;
 
 use cortex_m_rt::entry;
 use hal::{gpio::NoPin, pac, prelude::*, spi::Spi};
-use smart_leds::{SmartLedsWrite, RGB};
+use smart_leds::{SmartLedsWrite,
+    hsv::{hsv2rgb, Hsv},
+};
 use ws2812_spi as ws2812;
 
 #[entry]
@@ -22,6 +24,8 @@ fn main() -> ! {
 
     let mut delay = hal::delay::Delay::new(cp.SYST, &clocks);
     let gpioa = dp.GPIOA.split();
+    let gpioc = dp.GPIOC.split();
+    let mut pc13 = gpioc.pc13.into_push_pull_output();
 
     let spi = Spi::new(
         dp.SPI1,
@@ -30,21 +34,26 @@ fn main() -> ! {
         3.mhz(),
         clocks,
     );
+    // Holds the colour values
+
     let mut ws = ws2812::Ws2812::new(spi);
 
-    let mut cnt: usize = 0;
-    let mut data: [RGB<u8>; 64] = [RGB::default(); 64];
+    const NUM_LEDS: usize = 8;
+    const BRIGHTNESS: u8 = 50;
+    const SATURATION: u8 = 255;
+    let mut leds: [Hsv; NUM_LEDS] = [ Hsv{hue: 0, sat: 0, val: 0}; NUM_LEDS ];
     loop {
-        for (idx, color) in data.iter_mut().enumerate() {
-            *color = match (cnt + idx) % 8 {
-                0 => RGB { r: 8, g: 0, b: 0 },
-                1 => RGB { r: 0, g: 4, b: 0 },
-                2 => RGB { r: 0, g: 0, b: 2 },
-                _ => RGB { r: 0, g: 0, b: 0 },
-            };
+        
+      for _j in 0..8 {
+        for i in 0..NUM_LEDS {
+          leds[i] = Hsv{hue: ((i * 32) as u8) + 32, sat: SATURATION, val: BRIGHTNESS};
+          /* The higher the value 4 the less fade there is and vice versa */ 
         }
-        ws.write(data.iter().cloned()).unwrap();
-        cnt += 1;
-        delay.delay_ms(50_u16);
+        let rgb_iterator = leds.iter().cloned().map(hsv2rgb);
+        ws.write(rgb_iterator).unwrap();
+        delay.delay_ms(200_u16); /* Change this to your hearts desire, the lower the value the faster your colors move (and vice versa) */
+        pc13.toggle();
+      }
+        
     }
 }
