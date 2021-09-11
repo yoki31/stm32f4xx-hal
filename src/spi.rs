@@ -74,11 +74,14 @@ where
 }
 
 /// A filler type for when the SCK pin is unnecessary
-pub type NoSck = NoPin;
+#[allow(non_upper_case_globals)]
+pub const NoSck: NoPin = NoPin;
 /// A filler type for when the Miso pin is unnecessary
-pub type NoMiso = NoPin;
+#[allow(non_upper_case_globals)]
+pub const NoMiso: NoPin = NoPin;
 /// A filler type for when the Mosi pin is unnecessary
-pub type NoMosi = NoPin;
+#[allow(non_upper_case_globals)]
+pub const NoMosi: NoPin = NoPin;
 
 impl<SPI> PinSck<SPI> for NoPin
 where

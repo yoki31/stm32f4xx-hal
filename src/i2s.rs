@@ -56,7 +56,8 @@ where
 }
 
 /// A placeholder for when the MCLK pin is not needed
-pub type NoMasterClock = NoPin;
+#[allow(non_upper_case_globals)]
+pub const NoMasterClock: NoPin = NoPin;
 
 /// A set of pins configured for I2S communication: (WS, CK, MCLK, SD)
 ///

@@ -198,9 +198,11 @@ where
 }
 
 /// A filler type for when the Tx pin is unnecessary
-pub type NoTx = NoPin;
+#[allow(non_upper_case_globals)]
+pub const NoTx: NoPin = NoPin;
 /// A filler type for when the Rx pin is unnecessary
-pub type NoRx = NoPin;
+#[allow(non_upper_case_globals)]
+pub const NoRx: NoPin = NoPin;
 
 impl<USART> PinTx<USART> for NoPin
 where
