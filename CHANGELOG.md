@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Added
 
+- `DynamicPin` with dynamically changed mode, remove `AF` constants [#372]
 - `count_down` constructor for `Timer` -> `CountDownTimer` without start [#382]
 - Implementation of RTIC Monotonic for TIM2 & TIM5 under `rtic` feature [#380]
 - `IoPin` for `Output<OpenDrain>> <-> Input<Floating>>` [#374]
