@@ -3,8 +3,8 @@
 use crate::{
     hal::watchdog::{Watchdog, WatchdogEnable},
     pac::{DBGMCU, IWDG},
-    time::MilliSeconds,
 };
+use fugit::MillisDurationU32;
 
 /// Wraps the Independent Watchdog (IWDG) peripheral
 pub struct IndependentWatchdog {
@@ -49,13 +49,13 @@ impl IndependentWatchdog {
     }
 
     /// Returns the interval in ms
-    pub fn interval(&self) -> MilliSeconds {
+    pub fn interval(&self) -> MillisDurationU32 {
         while self.is_pr_updating() {}
 
         let pr = self.iwdg.pr.read().pr().bits();
         let rl = self.iwdg.rlr.read().rl().bits();
         let ms = Self::timeout_period(pr, rl);
-        MilliSeconds(ms)
+        MillisDurationU32::from_ticks(ms)
     }
 
     /// pr: Prescaler divider bits, rl: reload value
@@ -88,10 +88,10 @@ impl IndependentWatchdog {
 }
 
 impl WatchdogEnable for IndependentWatchdog {
-    type Time = MilliSeconds;
+    type Time = MillisDurationU32;
 
     fn start<T: Into<Self::Time>>(&mut self, period: T) {
-        self.setup(period.into().0);
+        self.setup(period.into().ticks());
 
         self.iwdg.kr.write(|w| unsafe { w.key().bits(KR_START) });
     }

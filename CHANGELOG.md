@@ -19,9 +19,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Changed
 
+- [breaking-change] use `fugit::TimerDuration` for `CountDown::Time` instead of `Hertz` [#381]
+- [breaking-change] Remove all deprecated
 - [breaking-change] Bump `stm32f4` to 0.14. Update RTIC based examples to use `rtic` 0.6 [#367]
 - [breaking-change] Bump `bxcan` to 0.6 [#371]
 
+[#381]: https://github.com/stm32-rs/stm32f4xx-hal/pull/381
 [#367]: https://github.com/stm32-rs/stm32f4xx-hal/pull/367
 [#371]: https://github.com/stm32-rs/stm32f4xx-hal/pull/371
 
