@@ -23,37 +23,42 @@ pub struct Timer<TIM> {
     pub(crate) tim: TIM,
     pub(crate) clk: Hertz,
 }
-
-/// Hardware timers
-pub struct CountDownTimer<TIM> {
+/// Timer that waits given time
+pub struct CountDownTimer<TIM, const FREQ: u32> {
     tim: TIM,
-    clk: Hertz,
 }
 
-impl<TIM> Timer<TIM> {
-    /// Creates CountDownTimer
-    pub fn count_down(self) -> CountDownTimer<TIM> {
-        let Self { tim, clk } = self;
-        CountDownTimer { tim, clk }
-    }
-}
+/// `CountDownTimer` with sampling of 1 MHz
+pub type CountDownTimerUs<TIM> = CountDownTimer<TIM, 1_000_000>;
+
+/// `CountDownTimer` with sampling of 1 kHz
+///
+/// NOTE: don't use this if your system frequency more than 65 MHz
+pub type CountDownTimerMs<TIM> = CountDownTimer<TIM, 1_000>;
 
 impl<TIM> Timer<TIM>
 where
-    CountDownTimer<TIM>: CountDown<Time = Hertz>,
+    TIM: Instance,
 {
-    /// Starts timer in count down mode at a given frequency
-    pub fn start_count_down<T>(self, timeout: T) -> CountDownTimer<TIM>
-    where
-        T: Into<Hertz>,
-    {
-        let mut timer = self.count_down();
-        timer.start(timeout);
-        timer
+    /// Creates CountDownTimer with custom sampling
+    pub fn count_down<const FREQ: u32>(self) -> CountDownTimer<TIM, FREQ> {
+        let Self { tim, clk } = self;
+        CountDownTimer::<TIM, FREQ>::new(tim, clk)
+    }
+    /// Creates CountDownTimer with sampling of 1 MHz
+    pub fn count_down_us(self) -> CountDownTimerUs<TIM> {
+        self.count_down::<1_000_000>()
+    }
+
+    /// Creates CountDownTimer with sampling of 1 kHz
+    ///
+    /// NOTE: don't use this if your system frequency more than 65 MHz
+    pub fn count_down_ms(self) -> CountDownTimerMs<TIM> {
+        self.count_down::<1_000>()
     }
 }
 
-impl<TIM> Periodic for CountDownTimer<TIM> {}
+impl<TIM, const FREQ: u32> Periodic for CountDownTimer<TIM, FREQ> {}
 
 /// Interrupt events
 pub enum Event {
@@ -78,12 +83,23 @@ impl Timer<SYST> {
         }
     }
 
+    /// Creates SysCountDownTimer
+    pub fn count_down(self) -> SysCountDownTimer {
+        let Self { tim, clk } = self;
+        SysCountDownTimer { tim, clk }
+    }
+
     pub fn release(self) -> SYST {
         self.tim
     }
 }
 
-impl CountDownTimer<SYST> {
+pub struct SysCountDownTimer {
+    tim: SYST,
+    clk: Hertz,
+}
+
+impl SysCountDownTimer {
     /// Starts listening for an `event`
     pub fn listen(&mut self, event: Event) {
         match event {
@@ -99,7 +115,7 @@ impl CountDownTimer<SYST> {
     }
 }
 
-impl CountDown for CountDownTimer<SYST> {
+impl CountDown for SysCountDownTimer {
     type Time = Hertz;
 
     fn start<T>(&mut self, timeout: T)
@@ -124,7 +140,7 @@ impl CountDown for CountDownTimer<SYST> {
     }
 }
 
-impl Cancel for CountDownTimer<SYST> {
+impl Cancel for SysCountDownTimer {
     type Error = Error;
 
     fn cancel(&mut self) -> Result<(), Self::Error> {
@@ -292,10 +308,16 @@ macro_rules! hal {
     }
 }
 
-impl<TIM> CountDownTimer<TIM>
+impl<TIM, const FREQ: u32> CountDownTimer<TIM, FREQ>
 where
     TIM: General,
 {
+    fn new(mut tim: TIM, clk: Hertz) -> Self {
+        let psc = clk.0 / FREQ - 1;
+        tim.set_prescaler(u16(psc).unwrap());
+        Self { tim }
+    }
+
     /// Starts listening for an `event`
     ///
     /// Note, you will also have to enable the TIM2 interrupt in the NVIC to start
@@ -340,11 +362,11 @@ where
     }
 }
 
-impl<TIM> CountDown for CountDownTimer<TIM>
+impl<TIM, const FREQ: u32> CountDown for CountDownTimer<TIM, FREQ>
 where
     TIM: General,
 {
-    type Time = Hertz;
+    type Time = fugit::TimerDurationU32<FREQ>;
 
     fn start<T>(&mut self, timeout: T)
     where
@@ -355,12 +377,7 @@ where
         // reset counter
         self.tim.reset_counter();
 
-        let frequency = timeout.into().0;
-        let ticks = self.clk.0 / frequency;
-        let psc = (ticks - 1) / (1 << 16);
-        self.tim.set_prescaler(u16(psc).unwrap());
-
-        let arr = ticks / (psc + 1);
+        let arr = timeout.into().ticks() - 1;
         self.tim.set_auto_reload(arr).unwrap();
 
         // Trigger update event to load the registers
@@ -380,7 +397,7 @@ where
     }
 }
 
-impl<TIM> Cancel for CountDownTimer<TIM>
+impl<TIM, const FREQ: u32> Cancel for CountDownTimer<TIM, FREQ>
 where
     TIM: General,
 {

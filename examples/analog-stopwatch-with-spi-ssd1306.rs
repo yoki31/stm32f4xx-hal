@@ -16,7 +16,7 @@ use crate::hal::{
     prelude::*,
     rcc::{Clocks, Rcc},
     spi::Spi,
-    timer::{CountDownTimer, Event, Timer},
+    timer::{CountDownTimerUs, Event, Timer},
 };
 
 use core::cell::{Cell, RefCell};
@@ -43,7 +43,7 @@ use ssd1306::{prelude::*, Ssd1306};
 // Set up global state. It's all mutexed up for concurrency safety.
 static ELAPSED_MS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0u32));
 static ELAPSED_RESET_MS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0u32));
-static TIMER_TIM2: Mutex<RefCell<Option<CountDownTimer<pac::TIM2>>>> =
+static TIMER_TIM2: Mutex<RefCell<Option<CountDownTimerUs<pac::TIM2>>>> =
     Mutex::new(RefCell::new(None));
 static STATE: Mutex<Cell<StopwatchState>> = Mutex::new(Cell::new(StopwatchState::Ready));
 static BUTTON: Mutex<RefCell<Option<PA0<Input<PullDown>>>>> = Mutex::new(RefCell::new(None));
@@ -128,7 +128,7 @@ fn main() -> ! {
 
     // Create a 1ms periodic interrupt from TIM2
     let mut timer = Timer::new(dp.TIM2, &clocks).count_down();
-    timer.start(1.hz());
+    timer.start(1.secs());
     timer.listen(Event::TimeOut);
 
     free(|cs| {

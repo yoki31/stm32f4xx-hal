@@ -24,9 +24,6 @@ pub trait U32Ext {
 
     /// Wrap in `MegaHertz`
     fn mhz(self) -> MegaHertz;
-
-    /// Wrap in `MilliSeconds`
-    fn ms(self) -> MilliSeconds;
 }
 
 impl U32Ext for u32 {
@@ -44,10 +41,6 @@ impl U32Ext for u32 {
 
     fn mhz(self) -> MegaHertz {
         MegaHertz(self)
-    }
-
-    fn ms(self) -> MilliSeconds {
-        MilliSeconds(self)
     }
 }
 
@@ -74,7 +67,3 @@ impl From<MegaHertz> for KiloHertz {
         Self(mhz.0 * 1_000)
     }
 }
-
-/// Time unit
-#[derive(PartialEq, PartialOrd, Clone, Copy, Debug)]
-pub struct MilliSeconds(pub u32);
