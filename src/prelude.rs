@@ -50,7 +50,6 @@ pub use embedded_hal::blocking::spi::{
 pub use embedded_hal::serial::Read as _embedded_hal_serial_Read;
 pub use embedded_hal::serial::Write as _embedded_hal_serial_Write;
 pub use embedded_hal::spi::FullDuplex as _embedded_hal_spi_FullDuplex;
-pub use embedded_hal::timer::CountDown as _embedded_hal_timer_CountDown;
 pub use embedded_hal::watchdog::Watchdog as _embedded_hal_watchdog_Watchdog;
 pub use embedded_hal::watchdog::WatchdogDisable as _embedded_hal_watchdog_WatchdogDisable;
 pub use embedded_hal::watchdog::WatchdogEnable as _embedded_hal_watchdog_WatchdogEnable;

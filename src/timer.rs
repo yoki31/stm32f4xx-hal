@@ -116,6 +116,37 @@ impl SysCountDownTimer {
     }
 }
 
+impl SysCountDownTimer {
+    pub fn start(&mut self, timeout: MicrosDurationU32) -> Result<(), Error> {
+        let mul = self.clk.0 / 1_000_000;
+        let rvr = timeout.ticks() * mul - 1;
+
+        assert!(rvr < (1 << 24));
+
+        self.tim.set_reload(rvr);
+        self.tim.clear_current();
+        self.tim.enable_counter();
+        Ok(())
+    }
+
+    pub fn wait(&mut self) -> nb::Result<(), Void> {
+        if self.tim.has_wrapped() {
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+
+    pub fn cancel(&mut self) -> Result<(), Error> {
+        if !self.tim.is_counter_enabled() {
+            return Err(Error::Disabled);
+        }
+
+        self.tim.disable_counter();
+        Ok(())
+    }
+}
+
 impl CountDown for SysCountDownTimer {
     type Time = MicrosDurationU32;
 
@@ -123,22 +154,11 @@ impl CountDown for SysCountDownTimer {
     where
         T: Into<Self::Time>,
     {
-        let mul = self.clk.0 / 1_000_000;
-        let rvr = timeout.into().ticks() * mul - 1;
-
-        assert!(rvr < (1 << 24));
-
-        self.tim.set_reload(rvr);
-        self.tim.clear_current();
-        self.tim.enable_counter();
+        self.start(timeout.into()).unwrap()
     }
 
     fn wait(&mut self) -> nb::Result<(), Void> {
-        if self.tim.has_wrapped() {
-            Ok(())
-        } else {
-            Err(nb::Error::WouldBlock)
-        }
+        self.wait()
     }
 }
 
@@ -146,12 +166,7 @@ impl Cancel for SysCountDownTimer {
     type Error = Error;
 
     fn cancel(&mut self) -> Result<(), Self::Error> {
-        if !self.tim.is_counter_enabled() {
-            return Err(Self::Error::Disabled);
-        }
-
-        self.tim.disable_counter();
-        Ok(())
+        self.cancel()
     }
 }
 
@@ -364,6 +379,48 @@ where
     }
 }
 
+impl<TIM, const FREQ: u32> CountDownTimer<TIM, FREQ>
+where
+    TIM: General,
+{
+    pub fn start(&mut self, timeout: TimerDurationU32<FREQ>) -> Result<(), Error> {
+        // pause
+        self.tim.disable_counter();
+        // reset counter
+        self.tim.reset_counter();
+
+        let arr = timeout.ticks() - 1;
+        self.tim.set_auto_reload(arr)?;
+
+        // Trigger update event to load the registers
+        self.tim.trigger_update();
+
+        // start counter
+        self.tim.enable_counter();
+
+        Ok(())
+    }
+
+    pub fn wait(&mut self) -> nb::Result<(), Void> {
+        if self.tim.get_update_interrupt_flag() {
+            Err(nb::Error::WouldBlock)
+        } else {
+            self.tim.clear_update_interrupt_flag();
+            Ok(())
+        }
+    }
+
+    pub fn cancel(&mut self) -> Result<(), Error> {
+        if !self.tim.is_counter_enabled() {
+            return Err(Error::Disabled);
+        }
+
+        // disable counter
+        self.tim.disable_counter();
+        Ok(())
+    }
+}
+
 impl<TIM, const FREQ: u32> CountDown for CountDownTimer<TIM, FREQ>
 where
     TIM: General,
@@ -374,28 +431,11 @@ where
     where
         T: Into<Self::Time>,
     {
-        // pause
-        self.tim.disable_counter();
-        // reset counter
-        self.tim.reset_counter();
-
-        let arr = timeout.into().ticks() - 1;
-        self.tim.set_auto_reload(arr).unwrap();
-
-        // Trigger update event to load the registers
-        self.tim.trigger_update();
-
-        // start counter
-        self.tim.enable_counter();
+        self.start(timeout.into()).unwrap()
     }
 
     fn wait(&mut self) -> nb::Result<(), Void> {
-        if self.tim.get_update_interrupt_flag() {
-            Err(nb::Error::WouldBlock)
-        } else {
-            self.tim.clear_update_interrupt_flag();
-            Ok(())
-        }
+        self.wait()
     }
 }
 
@@ -406,13 +446,7 @@ where
     type Error = Error;
 
     fn cancel(&mut self) -> Result<(), Self::Error> {
-        if !self.tim.is_counter_enabled() {
-            return Err(Self::Error::Disabled);
-        }
-
-        // disable counter
-        self.tim.disable_counter();
-        Ok(())
+        self.cancel()
     }
 }
 
