@@ -7,6 +7,7 @@ use cast::u16;
 use cortex_m::peripheral::syst::SystClkSource;
 use cortex_m::peripheral::{DCB, DWT, SYST};
 use embedded_hal::timer::{Cancel, CountDown, Periodic};
+use fugit::{MicrosDurationU32, TimerDurationU32};
 use void::Void;
 
 use crate::pac::RCC;
@@ -116,13 +117,14 @@ impl SysCountDownTimer {
 }
 
 impl CountDown for SysCountDownTimer {
-    type Time = Hertz;
+    type Time = MicrosDurationU32;
 
     fn start<T>(&mut self, timeout: T)
     where
-        T: Into<Hertz>,
+        T: Into<Self::Time>,
     {
-        let rvr = self.clk.0 / timeout.into().0 - 1;
+        let mul = self.clk.0 / 1_000_000;
+        let rvr = timeout.into().ticks() * mul - 1;
 
         assert!(rvr < (1 << 24));
 
@@ -361,7 +363,7 @@ impl<TIM, const FREQ: u32> CountDown for CountDownTimer<TIM, FREQ>
 where
     TIM: General,
 {
-    type Time = fugit::TimerDurationU32<FREQ>;
+    type Time = TimerDurationU32<FREQ>;
 
     fn start<T>(&mut self, timeout: T)
     where

@@ -31,7 +31,7 @@ fn main() -> ! {
 
     // Create a timer based on SysTick
     let mut timer = Timer::syst(cp.SYST, &clocks).count_down();
-    timer.start(24.hz());
+    timer.start(42.millis());
 
     hprintln!("hello!").unwrap();
     // wait until timer expires
@@ -47,7 +47,7 @@ fn main() -> ! {
     timer.cancel().unwrap();
 
     // start it again
-    timer.start(24.hz());
+    timer.start(42.millis());
     nb::block!(timer.wait()).unwrap();
     hprintln!("timer expired 3").unwrap();
 
