@@ -2,7 +2,7 @@ use super::*;
 
 use cast::u16;
 use embedded_hal::timer::{Cancel, CountDown, Periodic};
-use fugit::{MicrosDurationU32, TimerDurationU32};
+use fugit::{MicrosDurationU32, TimerDurationU32, TimerInstantU32};
 use void::Void;
 
 /// Timer that waits given time
@@ -46,16 +46,23 @@ impl Timer<SYST> {
     /// Creates SysCountDownTimer
     pub fn count_down(self) -> SysCountDownTimer {
         let Self { tim, clk } = self;
-        SysCountDownTimer { tim, clk }
+        SysCountDownTimer::new(tim, clk)
     }
 }
 
 pub struct SysCountDownTimer {
     tim: SYST,
-    clk: Hertz,
+    mhz: u32,
 }
 
 impl SysCountDownTimer {
+    fn new(tim: SYST, clk: Hertz) -> Self {
+        Self {
+            tim,
+            mhz: clk.0 / 1_000_000,
+        }
+    }
+
     /// Starts listening for an `event`
     pub fn listen(&mut self, event: Event) {
         match event {
@@ -69,12 +76,13 @@ impl SysCountDownTimer {
             Event::TimeOut => self.tim.disable_interrupt(),
         }
     }
-}
 
-impl SysCountDownTimer {
+    pub fn now(&self) -> TimerInstantU32<1_000_000> {
+        TimerInstantU32::from_ticks(SYST::get_current() / self.mhz)
+    }
+
     pub fn start(&mut self, timeout: MicrosDurationU32) -> Result<(), Error> {
-        let mul = self.clk.0 / 1_000_000;
-        let rvr = timeout.ticks() * mul - 1;
+        let rvr = timeout.ticks() * self.mhz - 1;
 
         assert!(rvr < (1 << 24));
 
@@ -84,7 +92,7 @@ impl SysCountDownTimer {
         Ok(())
     }
 
-    pub fn wait(&mut self) -> nb::Result<(), Void> {
+    pub fn wait(&mut self) -> nb::Result<(), Error> {
         if self.tim.has_wrapped() {
             Ok(())
         } else {
@@ -113,7 +121,10 @@ impl CountDown for SysCountDownTimer {
     }
 
     fn wait(&mut self) -> nb::Result<(), Void> {
-        self.wait()
+        match self.wait() {
+            Err(nb::Error::WouldBlock) => Err(nb::Error::WouldBlock),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -177,12 +188,11 @@ where
         self.tim.disable_counter();
         self.tim
     }
-}
 
-impl<TIM, const FREQ: u32> CountDownTimer<TIM, FREQ>
-where
-    TIM: General,
-{
+    pub fn now(&self) -> TimerInstantU32<FREQ> {
+        TimerInstantU32::from_ticks(self.tim.read_count().into())
+    }
+
     pub fn start(&mut self, timeout: TimerDurationU32<FREQ>) -> Result<(), Error> {
         // pause
         self.tim.disable_counter();
@@ -201,7 +211,7 @@ where
         Ok(())
     }
 
-    pub fn wait(&mut self) -> nb::Result<(), Void> {
+    pub fn wait(&mut self) -> nb::Result<(), Error> {
         if self.tim.get_update_interrupt_flag() {
             Err(nb::Error::WouldBlock)
         } else {
@@ -235,7 +245,10 @@ where
     }
 
     fn wait(&mut self) -> nb::Result<(), Void> {
-        self.wait()
+        match self.wait() {
+            Err(nb::Error::WouldBlock) => Err(nb::Error::WouldBlock),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -247,5 +260,42 @@ where
 
     fn cancel(&mut self) -> Result<(), Self::Error> {
         self.cancel()
+    }
+}
+
+#[cfg(feature = "atat")]
+impl atat::Clock<1_000_000> for SysCountDownTimer {
+    type Error = Error;
+
+    fn now(&mut self) -> TimerInstantU32<1_000_000> {
+        Self::now(self)
+    }
+
+    fn start(&mut self, duration: MicrosDurationU32) -> Result<(), Self::Error> {
+        self.start(duration)
+    }
+
+    fn wait(&mut self) -> nb::Result<(), Self::Error> {
+        self.wait()
+    }
+}
+
+#[cfg(feature = "atat")]
+impl<TIM, const FREQ: u32> atat::Clock<FREQ> for CountDownTimer<TIM, FREQ>
+where
+    TIM: General,
+{
+    type Error = Error;
+
+    fn now(&mut self) -> TimerInstantU32<FREQ> {
+        Self::now(self)
+    }
+
+    fn start(&mut self, duration: TimerDurationU32<FREQ>) -> Result<(), Self::Error> {
+        self.start(duration)
+    }
+
+    fn wait(&mut self) -> nb::Result<(), Self::Error> {
+        self.wait()
     }
 }
