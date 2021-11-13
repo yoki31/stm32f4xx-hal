@@ -128,7 +128,7 @@ fn main() -> ! {
 
     // Create a 1ms periodic interrupt from TIM2
     let mut timer = Timer::new(dp.TIM2, &clocks).count_down();
-    timer.start(1.secs());
+    timer.start(1.secs()).unwrap();
     timer.listen(Event::TimeOut);
 
     free(|cs| {

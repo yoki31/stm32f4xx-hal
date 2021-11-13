@@ -20,7 +20,6 @@ use crate::hal::{
 use core::cell::RefCell;
 use cortex_m::{asm::wfi, interrupt::Mutex};
 use cortex_m_rt::entry;
-use embedded_hal::timer::CountDown;
 
 // NOTE You can uncomment 'hprintln' here and in the code below for a bit more
 // verbosity at runtime, at the cost of throwing off the timing of the blink
@@ -80,7 +79,7 @@ fn main() -> ! {
 
     // Set up a timer expiring after 1s
     let mut timer = Timer::new(dp.TIM2, &clocks).count_down();
-    timer.start(1.secs());
+    timer.start(1.secs()).unwrap();
 
     // Generate an interrupt when the timer expires
     timer.listen(Event::TimeOut);
