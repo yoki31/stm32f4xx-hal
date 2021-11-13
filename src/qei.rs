@@ -3,6 +3,7 @@ use crate::{
     hal::{self, Direction},
     pac::RCC,
     rcc,
+    timer::General,
 };
 
 pub trait Pins<TIM> {}
@@ -49,7 +50,7 @@ impl<TIM: Instance, PINS> Qei<TIM, PINS> {
 }
 
 impl<TIM: Instance, PINS> hal::Qei for Qei<TIM, PINS> {
-    type Count = TIM::Count;
+    type Count = TIM::Width;
 
     fn count(&self) -> Self::Count {
         self.tim.read_count() as Self::Count
@@ -64,20 +65,16 @@ impl<TIM: Instance, PINS> hal::Qei for Qei<TIM, PINS> {
     }
 }
 
-pub trait Instance: crate::Sealed + rcc::Enable + rcc::Reset {
-    type Count;
-
+pub trait Instance: crate::Sealed + rcc::Enable + rcc::Reset + General {
     fn setup_qei(&mut self);
-    fn read_count(&self) -> Self::Count;
+
     fn read_direction(&self) -> bool;
 }
 
 macro_rules! hal {
-    ($($TIM:ty: ($bits:ident),)+) => {
+    ($($TIM:ty,)+) => {
         $(
             impl Instance for $TIM {
-                type Count = $bits;
-
                 fn setup_qei(&mut self) {
                     // Configure TxC1 and TxC2 as captures
                     self.ccmr1_output()
@@ -98,12 +95,8 @@ macro_rules! hal {
                     #[allow(unused_unsafe)]
                     self.smcr.write(|w| unsafe { w.sms().bits(3) });
                     #[allow(unused_unsafe)]
-                    self.arr.write(|w| unsafe { w.bits($bits::MAX as u32) });
+                    self.set_auto_reload(<$TIM as General>::Width::MAX as u32).unwrap();
                     self.cr1.write(|w| w.cen().set_bit());
-                }
-
-                fn read_count(&self) -> Self::Count {
-                    self.cnt.read().bits() as Self::Count
                 }
 
                 fn read_direction(&self) -> bool {
@@ -115,18 +108,18 @@ macro_rules! hal {
 }
 
 hal! {
-    crate::pac::TIM1: (u16),
-    crate::pac::TIM5: (u32),
+    crate::pac::TIM1,
+    crate::pac::TIM5,
 }
 
 #[cfg(feature = "tim2")]
 hal! {
-    crate::pac::TIM2: (u32),
-    crate::pac::TIM3: (u16),
-    crate::pac::TIM4: (u16),
+    crate::pac::TIM2,
+    crate::pac::TIM3,
+    crate::pac::TIM4,
 }
 
 #[cfg(feature = "tim8")]
 hal! {
-    crate::pac::TIM8: (u16),
+    crate::pac::TIM8,
 }
