@@ -1,9 +1,66 @@
 use super::*;
 
 use cast::u16;
-use embedded_hal::timer::{Cancel, CountDown, Periodic};
 use fugit::{MicrosDurationU32, TimerDurationU32};
-use void::Void;
+
+/// Marker trait that indicates that a timer is periodic
+pub trait Periodic {}
+
+/// A count down timer
+pub trait CountDown {
+    /// An enumeration of `CountDown` errors.
+    ///
+    /// For infallible implementations, will be `Infallible`
+    type Error: core::fmt::Debug;
+
+    /// Starts a new count down
+    fn start<const F: u32>(&mut self, count: TimerDurationU32<F>) -> Result<(), Self::Error>;
+
+    /// Non-blockingly "waits" until the count down finishes
+    ///
+    /// # Contract
+    ///
+    /// - If `Self: Periodic`, the timer will start a new count down right after the last one
+    /// finishes.
+    /// - Otherwise the behavior of calling `wait` after the last call returned `Ok` is UNSPECIFIED.
+    /// Implementers are suggested to panic on this scenario to signal a programmer error.
+    fn wait(&mut self) -> nb::Result<(), Self::Error>;
+}
+
+impl<T> CountDown for &mut T
+where
+    T: CountDown,
+{
+    type Error = T::Error;
+
+    fn start<const F: u32>(&mut self, count: TimerDurationU32<F>) -> Result<(), Self::Error> {
+        T::start::<F>(self, count)
+    }
+
+    fn wait(&mut self) -> nb::Result<(), Self::Error> {
+        T::wait(self)
+    }
+}
+
+/// Trait for cancelable countdowns.
+pub trait Cancel: CountDown {
+    /// Tries to cancel this countdown.
+    ///
+    /// # Errors
+    ///
+    /// An error will be returned if the countdown has already been canceled or was never started.
+    /// An error is also returned if the countdown is not `Periodic` and has already expired.
+    fn cancel(&mut self) -> Result<(), Self::Error>;
+}
+
+impl<T> Cancel for &mut T
+where
+    T: Cancel,
+{
+    fn cancel(&mut self) -> Result<(), Self::Error> {
+        T::cancel(self)
+    }
+}
 
 /// Timer that waits given time
 pub struct CountDownTimer<TIM, const FREQ: u32> {
@@ -84,7 +141,7 @@ impl SysCountDownTimer {
         Ok(())
     }
 
-    pub fn wait(&mut self) -> nb::Result<(), Void> {
+    pub fn wait(&mut self) -> nb::Result<(), Error> {
         if self.tim.has_wrapped() {
             Ok(())
         } else {
@@ -103,23 +160,18 @@ impl SysCountDownTimer {
 }
 
 impl CountDown for SysCountDownTimer {
-    type Time = MicrosDurationU32;
+    type Error = Error;
 
-    fn start<T>(&mut self, timeout: T)
-    where
-        T: Into<Self::Time>,
-    {
-        self.start(timeout.into()).unwrap()
+    fn start<const F: u32>(&mut self, timeout: TimerDurationU32<F>) -> Result<(), Self::Error> {
+        self.start(timeout.convert())
     }
 
-    fn wait(&mut self) -> nb::Result<(), Void> {
+    fn wait(&mut self) -> nb::Result<(), Self::Error> {
         self.wait()
     }
 }
 
 impl Cancel for SysCountDownTimer {
-    type Error = Error;
-
     fn cancel(&mut self) -> Result<(), Self::Error> {
         self.cancel()
     }
@@ -201,7 +253,7 @@ where
         Ok(())
     }
 
-    pub fn wait(&mut self) -> nb::Result<(), Void> {
+    pub fn wait(&mut self) -> nb::Result<(), Error> {
         if self.tim.get_update_interrupt_flag() {
             Err(nb::Error::WouldBlock)
         } else {
@@ -225,16 +277,13 @@ impl<TIM, const FREQ: u32> CountDown for CountDownTimer<TIM, FREQ>
 where
     TIM: General,
 {
-    type Time = TimerDurationU32<FREQ>;
+    type Error = Error;
 
-    fn start<T>(&mut self, timeout: T)
-    where
-        T: Into<Self::Time>,
-    {
-        self.start(timeout.into()).unwrap()
+    fn start<const F: u32>(&mut self, timeout: TimerDurationU32<F>) -> Result<(), Self::Error> {
+        self.start(timeout.convert())
     }
 
-    fn wait(&mut self) -> nb::Result<(), Void> {
+    fn wait(&mut self) -> nb::Result<(), Self::Error> {
         self.wait()
     }
 }
@@ -243,8 +292,6 @@ impl<TIM, const FREQ: u32> Cancel for CountDownTimer<TIM, FREQ>
 where
     TIM: General,
 {
-    type Error = Error;
-
     fn cancel(&mut self) -> Result<(), Self::Error> {
         self.cancel()
     }
