@@ -5,10 +5,24 @@ use crate::{
     pac::{DBGMCU, IWDG},
     time::MilliSeconds,
 };
+use core::fmt;
 
 /// Wraps the Independent Watchdog (IWDG) peripheral
 pub struct IndependentWatchdog {
     iwdg: IWDG,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for IndependentWatchdog {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "IndependentWatchdog");
+    }
+}
+
+impl fmt::Debug for IndependentWatchdog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IndependentWatchdog")
+    }
 }
 
 const MAX_PR: u8 = 0b110;

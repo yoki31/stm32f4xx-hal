@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Added
 
+- `Debug` & `defmt::Format` impls for some structures and enums [#385]
 - `Into<serial::Config>` for `Bps` [#387]
 - `count_down` constructor for `Timer` -> `CountDownTimer` without start [#382]
 - Implementation of RTIC Monotonic for TIM2 & TIM5 under `rtic` feature [#380]
 - `IoPin` for `Output<OpenDrain>> <-> Input<Floating>>` [#374]
 
+[#385]: https://github.com/stm32-rs/stm32f4xx-hal/pull/385
 [#382]: https://github.com/stm32-rs/stm32f4xx-hal/pull/382
 [#380]: https://github.com/stm32-rs/stm32f4xx-hal/pull/380
 [#374]: https://github.com/stm32-rs/stm32f4xx-hal/pull/374

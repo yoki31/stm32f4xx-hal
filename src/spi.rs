@@ -45,8 +45,9 @@ use crate::rcc::Clocks;
 use crate::time::Hertz;
 
 /// SPI error
-#[non_exhaustive]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[non_exhaustive]
 pub enum Error {
     /// Overrun occurred
     Overrun,
@@ -58,6 +59,7 @@ pub enum Error {
 
 pub trait Pins<SPI> {}
 pub trait PinSck<SPI> {
+    // TODO: replace with `const A: u8` when rust #70256 issue solved and stabilized
     type A;
 }
 pub trait PinMiso<SPI> {
@@ -372,6 +374,8 @@ pins! {
 }
 
 /// Interrupt events
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum Event {
     /// New data has been received
     Rxne,
