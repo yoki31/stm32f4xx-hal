@@ -1,10 +1,10 @@
 use crate::{
-    bb, hal as pwm,
+    bb,
     time::Hertz,
     timer::{General, Timer},
 };
 use cast::u16;
-use core::{marker::PhantomData, mem::MaybeUninit};
+use core::{convert::Infallible, marker::PhantomData, mem::MaybeUninit};
 
 pub trait Pins<TIM, P> {
     const C1: bool = false;
@@ -104,8 +104,9 @@ macro_rules! pwm_pin {
             }
         }
 
-        impl pwm::PwmPin for PwmChannel<$TIMX, $C> {
+        impl embedded_hal::PwmPin for PwmChannel<$TIMX, $C> {
             type Duty = u16;
+
             fn disable(&mut self) {
                 self.disable()
             }
@@ -120,6 +121,27 @@ macro_rules! pwm_pin {
             }
             fn set_duty(&mut self, duty: Self::Duty) {
                 self.set_duty(duty)
+            }
+        }
+
+        impl embedded_hal_one::pwm::blocking::PwmPin for PwmChannel<$TIMX, $C> {
+            type Error = Infallible;
+            type Duty = u16;
+
+            fn disable(&mut self) -> Result<(), Self::Error> {
+                Ok(self.disable())
+            }
+            fn enable(&mut self) -> Result<(), Self::Error> {
+                Ok(self.enable())
+            }
+            fn get_duty(&self) -> Result<Self::Duty, Self::Error> {
+                Ok(self.get_duty())
+            }
+            fn get_max_duty(&self) -> Result<Self::Duty, Self::Error> {
+                Ok(self.get_max_duty())
+            }
+            fn set_duty(&mut self, duty: Self::Duty) -> Result<(), Self::Error> {
+                Ok(self.set_duty(duty))
             }
         }
     };
