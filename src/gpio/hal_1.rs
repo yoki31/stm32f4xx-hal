@@ -11,7 +11,7 @@ use embedded_hal_one::digital::blocking::{
 pub use embedded_hal_one::digital::PinState;
 
 impl From<PinState> for super::PinState {
-    fn from(state: PinState) -> super::PinState {
+    fn from(state: PinState) -> Self {
         match state {
             PinState::Low => Self::Low,
             PinState::High => Self::High,

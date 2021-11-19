@@ -11,7 +11,7 @@ use embedded_hal::digital::v2::{
 };
 
 impl From<PinState> for super::PinState {
-    fn from(state: PinState) -> super::PinState {
+    fn from(state: PinState) -> Self {
         match state {
             PinState::Low => Self::Low,
             PinState::High => Self::High,
