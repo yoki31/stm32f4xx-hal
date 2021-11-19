@@ -4,8 +4,36 @@ use core::ptr;
 
 use crate::dma::traits::PeriAddress;
 use crate::gpio::{Const, NoPin, PinA, PushPull, SetAlternate};
-use embedded_hal::spi;
-pub use embedded_hal::spi::{Mode, Phase, Polarity};
+
+/// Clock polarity
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Polarity {
+    /// Clock signal low when idle
+    IdleLow,
+    /// Clock signal high when idle
+    IdleHigh,
+}
+
+/// Clock phase
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Data in "captured" on the first clock transition
+    CaptureOnFirstTransition,
+    /// Data in "captured" on the second clock transition
+    CaptureOnSecondTransition,
+}
+
+/// SPI mode
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mode {
+    /// Clock polarity
+    pub polarity: Polarity,
+    /// Clock phase
+    pub phase: Phase,
+}
+
+mod hal_02;
+mod hal_1;
 
 use crate::pac::{spi1, RCC, SPI1, SPI2};
 use crate::rcc;
@@ -141,7 +169,7 @@ where
     pub fn new(
         spi: SPI,
         mut pins: PINS,
-        mode: Mode,
+        mode: impl Into<Mode>,
         freq: impl Into<Hertz>,
         clocks: &Clocks,
     ) -> Self {
@@ -159,7 +187,7 @@ where
             pins,
             transfer_mode: TransferModeNormal,
         }
-        .pre_init(mode, freq.into(), SPI::clock(clocks))
+        .pre_init(mode.into(), freq.into(), SPI::clock(clocks))
         .init()
     }
 
@@ -178,7 +206,7 @@ where
     pub fn new_bidi(
         spi: SPI,
         mut pins: PINS,
-        mode: Mode,
+        mode: impl Into<Mode>,
         freq: impl Into<Hertz>,
         clocks: &Clocks,
     ) -> Self {
@@ -196,7 +224,7 @@ where
             pins,
             transfer_mode: TransferModeBidi,
         }
-        .pre_init(mode, freq.into(), SPI::clock(clocks))
+        .pre_init(mode.into(), freq.into(), SPI::clock(clocks))
         .init()
     }
 
@@ -284,7 +312,7 @@ where
     }
 
     /// Pre initializing the SPI bus.
-    pub fn pre_init(self, mode: Mode, freq: Hertz, clock: Hertz) -> Self {
+    fn pre_init(self, mode: Mode, freq: Hertz, clock: Hertz) -> Self {
         // disable SS output
         self.spi.cr2.write(|w| w.ssoe().clear_bit());
 
@@ -499,149 +527,4 @@ where
     }
 
     type MemSize = u8;
-}
-
-impl<SPI, PINS> spi::FullDuplex<u8> for Spi<SPI, PINS, TransferModeNormal>
-where
-    SPI: Instance,
-{
-    type Error = Error;
-
-    fn read(&mut self) -> nb::Result<u8, Error> {
-        self.check_read()
-    }
-
-    fn send(&mut self, byte: u8) -> nb::Result<(), Error> {
-        self.check_send(byte)
-    }
-}
-
-impl<SPI, PINS> spi::FullDuplex<u8> for Spi<SPI, PINS, TransferModeBidi>
-where
-    SPI: Instance,
-{
-    type Error = Error;
-
-    fn read(&mut self) -> nb::Result<u8, Error> {
-        self.spi.cr1.modify(|_, w| w.bidioe().clear_bit());
-        self.check_read()
-    }
-
-    fn send(&mut self, byte: u8) -> nb::Result<(), Error> {
-        self.spi.cr1.modify(|_, w| w.bidioe().set_bit());
-        self.check_send(byte)
-    }
-}
-
-mod blocking {
-    use super::{Error, Instance, Spi, TransferModeBidi, TransferModeNormal};
-    use embedded_hal::blocking::spi::{Operation, Transactional, Transfer, Write, WriteIter};
-    use embedded_hal::spi::FullDuplex;
-
-    impl<SPI, PINS, TRANSFER_MODE> Transfer<u8> for Spi<SPI, PINS, TRANSFER_MODE>
-    where
-        Self: FullDuplex<u8, Error = Error>,
-        SPI: Instance,
-    {
-        type Error = Error;
-
-        fn transfer<'w>(&mut self, words: &'w mut [u8]) -> Result<&'w [u8], Self::Error> {
-            for word in words.iter_mut() {
-                nb::block!(self.send(*word))?;
-                *word = nb::block!(self.read())?;
-            }
-
-            Ok(words)
-        }
-    }
-
-    impl<SPI, PINS> Write<u8> for Spi<SPI, PINS, TransferModeNormal>
-    where
-        Self: FullDuplex<u8, Error = Error>,
-        SPI: Instance,
-    {
-        type Error = Error;
-
-        fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-            for word in words {
-                nb::block!(self.send(*word))?;
-                nb::block!(self.read())?;
-            }
-
-            Ok(())
-        }
-    }
-
-    impl<SPI, PINS> Write<u8> for Spi<SPI, PINS, TransferModeBidi>
-    where
-        Self: FullDuplex<u8, Error = Error>,
-        SPI: Instance,
-    {
-        type Error = Error;
-
-        fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-            for word in words {
-                nb::block!(self.send(*word))?;
-            }
-
-            Ok(())
-        }
-    }
-
-    impl<SPI, PINS> WriteIter<u8> for Spi<SPI, PINS, TransferModeNormal>
-    where
-        Self: FullDuplex<u8, Error = Error>,
-        SPI: Instance,
-    {
-        type Error = Error;
-
-        fn write_iter<WI>(&mut self, words: WI) -> Result<(), Self::Error>
-        where
-            WI: IntoIterator<Item = u8>,
-        {
-            for word in words.into_iter() {
-                nb::block!(self.send(word))?;
-                nb::block!(self.read())?;
-            }
-
-            Ok(())
-        }
-    }
-
-    impl<SPI, PINS> WriteIter<u8> for Spi<SPI, PINS, TransferModeBidi>
-    where
-        Self: FullDuplex<u8, Error = Error>,
-        SPI: Instance,
-    {
-        type Error = Error;
-
-        fn write_iter<WI>(&mut self, words: WI) -> Result<(), Self::Error>
-        where
-            WI: IntoIterator<Item = u8>,
-        {
-            for word in words.into_iter() {
-                nb::block!(self.send(word))?;
-            }
-
-            Ok(())
-        }
-    }
-
-    impl<SPI, PINS, TRANSFER_MODE, W: 'static> Transactional<W> for Spi<SPI, PINS, TRANSFER_MODE>
-    where
-        Self: Write<W, Error = Error> + Transfer<W, Error = Error>,
-    {
-        type Error = Error;
-
-        fn exec<'a>(&mut self, operations: &mut [Operation<'a, W>]) -> Result<(), Error> {
-            for op in operations {
-                match op {
-                    Operation::Write(w) => self.write(w)?,
-                    Operation::Transfer(t) => self.transfer(t).map(|_| ())?,
-                }
-            }
-
-            Ok(())
-        }
-    }
 }
