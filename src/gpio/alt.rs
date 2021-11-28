@@ -1,5 +1,5 @@
 use super::*;
-use crate::{i2c, i2s, pac, serial, spi};
+use crate::{i2c, i2s, pac, sdio, serial, spi};
 
 pub struct Const<const A: u8>;
 
@@ -684,4 +684,38 @@ pin! {
 
     <serial::TxPin, UART10> for [gpioe::PE3<11>, gpiog::PG12<11>],
     <serial::RxPin, UART10> for [gpioe::PE2<11>, gpiog::PG11<11>]
+}
+
+#[cfg(feature = "sdio")]
+pin! {
+    <sdio::Clk, SDIO> for [gpioc::PC12<12>],
+    <sdio::Cmd, SDIO> for [gpiod::PD2<12>],
+    <sdio::D0, SDIO> for [gpioc::PC8<12>],
+    <sdio::D1, SDIO> for [gpioc::PC9<12>],
+    <sdio::D2, SDIO> for [gpioc::PC10<12>],
+    <sdio::D3, SDIO> for [gpioc::PC11<12>]
+}
+
+#[cfg(any(
+    feature = "stm32f411",
+    feature = "stm32f412",
+    feature = "stm32f413",
+    feature = "stm32f423"
+))]
+pin! {
+    <sdio::Clk, SDIO> for [gpiob::PB15<12>],
+    <sdio::Cmd, SDIO> for [gpioa::PA6<12>],
+    <sdio::D0, SDIO> for [gpiob::PB4<12>],
+    <sdio::D1, SDIO> for [gpioa::PA8<12>],
+    <sdio::D2, SDIO> for [gpioa::PA9<12>],
+    <sdio::D3, SDIO> for [gpiob::PB5<12>]
+}
+#[cfg(any(feature = "stm32f412", feature = "stm32f413", feature = "stm32f423"))]
+pin! {
+    <sdio::D0, SDIO> for [gpiob::PB6<12>]
+}
+
+#[cfg(feature = "stm32f411")]
+pin! {
+    <sdio::D0, SDIO> for [gpiob::PB7<12>]
 }
