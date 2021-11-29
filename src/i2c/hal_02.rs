@@ -103,10 +103,12 @@ mod blocking {
                 while self.i2c.sr1.read().sb().bit_is_clear() {}
 
                 // Also wait until signalled we're master and everything is waiting for us
-                while {
+                loop {
                     let sr2 = self.i2c.sr2.read();
-                    sr2.msl().bit_is_clear() && sr2.busy().bit_is_clear()
-                } {}
+                    if !(sr2.msl().bit_is_clear() && sr2.busy().bit_is_clear()) {
+                        break;
+                    }
+                }
 
                 // Set up current address, we're trying to talk to
                 self.i2c

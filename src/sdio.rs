@@ -341,10 +341,12 @@ impl Sdio {
         let mut i = 0;
         let mut sta;
 
-        while {
+        loop {
             sta = self.sdio.sta.read();
-            sta.rxact().bit_is_set()
-        } {
+            if sta.rxact().bit_is_clear() {
+                break;
+            }
+
             if sta.rxfifohf().bit() {
                 for _ in 0..8 {
                     let bytes = self.sdio.fifo.read().bits().to_le_bytes();
@@ -383,10 +385,12 @@ impl Sdio {
         let mut i = 0;
         let mut sta;
 
-        while {
+        loop {
             sta = self.sdio.sta.read();
-            sta.txact().bit_is_set()
-        } {
+            if sta.txact().bit_is_clear() {
+                break;
+            }
+
             if sta.txfifohe().bit() {
                 for _ in 0..8 {
                     let mut wb = [0u8; 4];
@@ -469,10 +473,12 @@ impl Sdio {
         let mut idx = 0;
         let mut sta;
 
-        while {
+        loop {
             sta = self.sdio.sta.read();
-            sta.rxact().bit_is_set()
-        } {
+            if sta.rxact().bit_is_clear() {
+                break;
+            }
+
             if sta.rxfifohf().bit() {
                 for _ in 0..8 {
                     status[15 - idx] = self.sdio.fifo.read().bits().swap_bytes();
@@ -509,10 +515,12 @@ impl Sdio {
         let mut i = 0;
         let mut sta;
 
-        while {
+        loop {
             sta = self.sdio.sta.read();
-            sta.rxact().bit_is_set()
-        } {
+            if sta.rxact().bit_is_clear() {
+                break;
+            }
+
             if sta.rxdavl().bit() {
                 buf[1 - i] = self.sdio.fifo.read().bits().swap_bytes();
                 i += 1;
@@ -594,21 +602,27 @@ impl Sdio {
         let mut sta;
         if cmd.response_len() == ResponseLen::Zero {
             // Wait for command sent or a timeout
-            while {
+            loop {
                 sta = self.sdio.sta.read();
 
-                (!(sta.ctimeout().bit() || sta.cmdsent().bit()) || sta.cmdact().bit_is_set())
-                    && timeout > 0
-            } {
+                if !((!(sta.ctimeout().bit() || sta.cmdsent().bit()) || sta.cmdact().bit_is_set())
+                    && timeout > 0)
+                {
+                    break;
+                }
+
                 timeout -= 1;
             }
         } else {
-            while {
+            loop {
                 sta = self.sdio.sta.read();
-                (!(sta.ctimeout().bit() || sta.cmdrend().bit() || sta.ccrcfail().bit())
+                if !((!(sta.ctimeout().bit() || sta.cmdrend().bit() || sta.ccrcfail().bit())
                     || sta.cmdact().bit_is_set())
-                    && timeout > 0
-            } {
+                    && timeout > 0)
+                {
+                    break;
+                }
+
                 timeout -= 1;
             }
         }
