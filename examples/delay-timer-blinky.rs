@@ -25,17 +25,19 @@ fn main() -> ! {
 
         // Set up the system clock. We want to run at 48MHz for this one.
         let rcc = dp.RCC.constrain();
-        let clocks = rcc.cfgr.sysclk(48.mhz()).freeze();
+        let clocks = rcc.cfgr.use_hse(25.MHz()).sysclk(48.MHz()).freeze();
 
         // Create a delay abstraction based on general-pupose 32-bit timer TIM5
-        let mut delay = hal::delay::Delay::tim5(dp.TIM5, &clocks);
+        let mut delay = dp.TIM5.delay_us(&clocks);
 
         loop {
-            // On for 1s, off for 1s.
+            // On for 1s, off for 3s.
             led.set_high();
-            delay.delay_ms(1_000_u32);
+            // Use `embedded_hal::DelayMs` trait
+            delay.delay_ms(1000_u32);
             led.set_low();
-            delay.delay_us(1_000_000_u32);
+            // or use `fugit::ExtU32` trait
+            delay.delay(3.secs());
         }
     }
 

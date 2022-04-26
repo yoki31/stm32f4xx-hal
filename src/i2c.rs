@@ -1,22 +1,16 @@
 use core::ops::Deref;
-use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
 
-use crate::pac::i2c1;
+use crate::pac::{self, i2c1};
 use crate::rcc::{Enable, Reset};
 
 use crate::gpio::{Const, OpenDrain, PinA, SetAlternate};
-#[cfg(feature = "i2c3")]
-use crate::pac::I2C3;
-use crate::pac::{I2C1, I2C2, RCC};
-
-#[allow(unused)]
-#[cfg(feature = "gpiof")]
-use crate::gpio::gpiof;
-#[allow(unused)]
-use crate::gpio::{gpioa, gpiob, gpioc, gpioh};
+use crate::pac::RCC;
 
 use crate::rcc::Clocks;
-use crate::time::{Hertz, U32Ext};
+use fugit::{HertzU32 as Hertz, RateExtU32};
+
+mod hal_02;
+mod hal_1;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum DutyCycle {
@@ -36,15 +30,13 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn standard<F: Into<Hertz>>(frequency: F) -> Self {
-        Self::Standard {
-            frequency: frequency.into(),
-        }
+    pub fn standard(frequency: Hertz) -> Self {
+        Self::Standard { frequency }
     }
 
-    pub fn fast<F: Into<Hertz>>(frequency: F, duty_cycle: DutyCycle) -> Self {
+    pub fn fast(frequency: Hertz, duty_cycle: DutyCycle) -> Self {
         Self::Fast {
-            frequency: frequency.into(),
+            frequency,
             duty_cycle,
         }
     }
@@ -57,13 +49,10 @@ impl Mode {
     }
 }
 
-impl<F> From<F> for Mode
-where
-    F: Into<Hertz>,
-{
-    fn from(frequency: F) -> Self {
-        let frequency: Hertz = frequency.into();
-        if frequency <= 100_000.hz() {
+impl From<Hertz> for Mode {
+    fn from(frequency: Hertz) -> Self {
+        let k100: Hertz = 100.kHz();
+        if frequency <= k100 {
             Self::Standard { frequency }
         } else {
             Self::Fast {
@@ -92,8 +81,8 @@ pub trait Pins<I2C> {
 
 impl<I2C, SCL, SDA, const SCLA: u8, const SDAA: u8> Pins<I2C> for (SCL, SDA)
 where
-    SCL: PinA<Scl, I2C, A = Const<SCLA>> + SetAlternate<OpenDrain, SCLA>,
-    SDA: PinA<Sda, I2C, A = Const<SDAA>> + SetAlternate<OpenDrain, SDAA>,
+    SCL: PinA<Scl, I2C, A = Const<SCLA>> + SetAlternate<SCLA, OpenDrain>,
+    SDA: PinA<Sda, I2C, A = Const<SDAA>> + SetAlternate<SDAA, OpenDrain>,
 {
     fn set_alt_mode(&mut self) {
         self.0.set_alt_mode();
@@ -105,32 +94,82 @@ where
     }
 }
 
+pub use embedded_hal_one::i2c::NoAcknowledgeSource;
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[non_exhaustive]
 pub enum Error {
-    OVERRUN,
-    NACK,
-    TIMEOUT,
-    // Note: The BUS error type is not currently returned, but is maintained for backwards
-    // compatibility.
-    BUS,
-    CRC,
-    ARBITRATION,
+    Overrun,
+    NoAcknowledge(NoAcknowledgeSource),
+    Timeout,
+    // Note: The Bus error type is not currently returned, but is maintained for compatibility.
+    Bus,
+    Crc,
+    ArbitrationLoss,
+}
+
+impl Error {
+    pub(crate) fn nack_addr(self) -> Self {
+        match self {
+            Error::NoAcknowledge(NoAcknowledgeSource::Unknown) => {
+                Error::NoAcknowledge(NoAcknowledgeSource::Address)
+            }
+            e => e,
+        }
+    }
+    pub(crate) fn nack_data(self) -> Self {
+        match self {
+            Error::NoAcknowledge(NoAcknowledgeSource::Unknown) => {
+                Error::NoAcknowledge(NoAcknowledgeSource::Data)
+            }
+            e => e,
+        }
+    }
 }
 
 pub trait Instance: crate::Sealed + Deref<Target = i2c1::RegisterBlock> + Enable + Reset {}
 
-impl Instance for I2C1 {}
-impl Instance for I2C2 {}
+impl Instance for pac::I2C1 {}
+pub type I2c1<PINS> = I2c<pac::I2C1, PINS>;
+impl Instance for pac::I2C2 {}
+pub type I2c2<PINS> = I2c<pac::I2C2, PINS>;
 
 #[cfg(feature = "i2c3")]
-impl Instance for I2C3 {}
+impl Instance for pac::I2C3 {}
+#[cfg(feature = "i2c3")]
+pub type I2c3<PINS> = I2c<pac::I2C3, PINS>;
 
-impl<I2C, PINS> I2c<I2C, PINS>
+pub trait I2cExt: Sized + Instance {
+    fn i2c<SCL, SDA>(
+        self,
+        pins: (SCL, SDA),
+        mode: impl Into<Mode>,
+        clocks: &Clocks,
+    ) -> I2c<Self, (SCL, SDA)>
+    where
+        (SCL, SDA): Pins<Self>;
+}
+
+impl<I2C: Instance> I2cExt for I2C {
+    fn i2c<SCL, SDA>(
+        self,
+        pins: (SCL, SDA),
+        mode: impl Into<Mode>,
+        clocks: &Clocks,
+    ) -> I2c<Self, (SCL, SDA)>
+    where
+        (SCL, SDA): Pins<Self>,
+    {
+        I2c::new(self, pins, mode, clocks)
+    }
+}
+
+impl<I2C, SCL, SDA> I2c<I2C, (SCL, SDA)>
 where
     I2C: Instance,
-    PINS: Pins<I2C>,
+    (SCL, SDA): Pins<I2C>,
 {
-    pub fn new<M: Into<Mode>>(i2c: I2C, mut pins: PINS, mode: M, clocks: &Clocks) -> Self {
+    pub fn new(i2c: I2C, mut pins: (SCL, SDA), mode: impl Into<Mode>, clocks: &Clocks) -> Self {
         unsafe {
             // NOTE(unsafe) this reference will only be used for atomic writes with no side effects.
             let rcc = &(*RCC::ptr());
@@ -147,24 +186,21 @@ where
         i2c
     }
 
-    pub fn release(mut self) -> (I2C, PINS) {
+    pub fn release(mut self) -> (I2C, (SCL, SDA)) {
         self.pins.restore_mode();
 
-        (self.i2c, self.pins)
+        (self.i2c, (self.pins.0, self.pins.1))
     }
 }
 
-impl<I2C, PINS> I2c<I2C, PINS>
-where
-    I2C: Instance,
-{
-    fn i2c_init<M: Into<Mode>>(&self, mode: M, pclk: Hertz) {
+impl<I2C: Instance, PINS> I2c<I2C, PINS> {
+    fn i2c_init(&self, mode: impl Into<Mode>, pclk: Hertz) {
         let mode = mode.into();
         // Make sure the I2C unit is disabled so we can configure it
         self.i2c.cr1.modify(|_, w| w.pe().clear_bit());
 
         // Calculate settings for I2C speed modes
-        let clock = pclk.0;
+        let clock = pclk.raw();
         let clc_mhz = clock / 1_000_000;
         assert!((2..=50).contains(&clc_mhz));
 
@@ -184,7 +220,7 @@ where
         match mode {
             // I2C clock control calculation
             Mode::Standard { frequency } => {
-                let ccr = (clock / (frequency.0 * 2)).max(4);
+                let ccr = (clock / (frequency.raw() * 2)).max(4);
 
                 // Set clock to standard mode with appropriate parameters for selected speed
                 self.i2c.ccr.write(|w| unsafe {
@@ -201,7 +237,7 @@ where
                 duty_cycle,
             } => match duty_cycle {
                 DutyCycle::Ratio2to1 => {
-                    let ccr = (clock / (frequency.0 * 3)).max(1);
+                    let ccr = (clock / (frequency.raw() * 3)).max(1);
 
                     // Set clock to fast mode with appropriate parameters for selected speed (2:1 duty cycle)
                     self.i2c.ccr.write(|w| unsafe {
@@ -209,7 +245,7 @@ where
                     });
                 }
                 DutyCycle::Ratio16to9 => {
-                    let ccr = (clock / (frequency.0 * 25)).max(1);
+                    let ccr = (clock / (frequency.raw() * 25)).max(1);
 
                     // Set clock to fast mode with appropriate parameters for selected speed (16:9 duty cycle)
                     self.i2c.ccr.write(|w| unsafe {
@@ -230,27 +266,27 @@ where
 
         if sr1.timeout().bit_is_set() {
             self.i2c.sr1.modify(|_, w| w.timeout().clear_bit());
-            return Err(Error::TIMEOUT);
+            return Err(Error::Timeout);
         }
 
         if sr1.pecerr().bit_is_set() {
             self.i2c.sr1.modify(|_, w| w.pecerr().clear_bit());
-            return Err(Error::CRC);
+            return Err(Error::Crc);
         }
 
         if sr1.ovr().bit_is_set() {
             self.i2c.sr1.modify(|_, w| w.ovr().clear_bit());
-            return Err(Error::OVERRUN);
+            return Err(Error::Overrun);
         }
 
         if sr1.af().bit_is_set() {
             self.i2c.sr1.modify(|_, w| w.af().clear_bit());
-            return Err(Error::NACK);
+            return Err(Error::NoAcknowledge(NoAcknowledgeSource::Unknown));
         }
 
         if sr1.arlo().bit_is_set() {
             self.i2c.sr1.modify(|_, w| w.arlo().clear_bit());
-            return Err(Error::ARBITRATION);
+            return Err(Error::ArbitrationLoss);
         }
 
         // The errata indicates that BERR may be incorrectly detected. It recommends ignoring and
@@ -261,21 +297,8 @@ where
 
         Ok(sr1)
     }
-}
 
-trait I2cCommon {
-    fn write_bytes(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error>;
-
-    fn send_byte(&self, byte: u8) -> Result<(), Error>;
-
-    fn recv_byte(&self) -> Result<u8, Error>;
-}
-
-impl<I2C, PINS> I2cCommon for I2c<I2C, PINS>
-where
-    I2C: Instance,
-{
-    fn write_bytes(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
+    fn write_bytes(&mut self, addr: u8, bytes: impl Iterator<Item = u8>) -> Result<(), Error> {
         // Send a START condition
         self.i2c.cr1.modify(|_, w| w.start().set_bit());
 
@@ -300,7 +323,9 @@ where
         // Wait until address was sent
         loop {
             // Check for any I2C errors. If a NACK occurs, the ADDR bit will never be set.
-            let sr1 = self.check_and_clear_error_flags()?;
+            let sr1 = self
+                .check_and_clear_error_flags()
+                .map_err(Error::nack_addr)?;
 
             // Wait for the address to be acknowledged
             if sr1.addr().bit_is_set() {
@@ -313,7 +338,7 @@ where
 
         // Send bytes
         for c in bytes {
-            self.send_byte(*c)?;
+            self.send_byte(c)?;
         }
 
         // Fallthrough is success
@@ -323,14 +348,24 @@ where
     fn send_byte(&self, byte: u8) -> Result<(), Error> {
         // Wait until we're ready for sending
         // Check for any I2C errors. If a NACK occurs, the ADDR bit will never be set.
-        while self.check_and_clear_error_flags()?.tx_e().bit_is_clear() {}
+        while self
+            .check_and_clear_error_flags()
+            .map_err(Error::nack_addr)?
+            .tx_e()
+            .bit_is_clear()
+        {}
 
         // Push out a byte of data
         self.i2c.dr.write(|w| unsafe { w.bits(u32::from(byte)) });
 
         // Wait until byte is transferred
         // Check for any potential error conditions.
-        while self.check_and_clear_error_flags()?.btf().bit_is_clear() {}
+        while self
+            .check_and_clear_error_flags()
+            .map_err(Error::nack_data)?
+            .btf()
+            .bit_is_clear()
+        {}
 
         Ok(())
     }
@@ -338,7 +373,8 @@ where
     fn recv_byte(&self) -> Result<u8, Error> {
         loop {
             // Check for any potential error conditions.
-            self.check_and_clear_error_flags()?;
+            self.check_and_clear_error_flags()
+                .map_err(Error::nack_data)?;
 
             if self.i2c.sr1.read().rx_ne().bit_is_set() {
                 break;
@@ -348,49 +384,8 @@ where
         let value = self.i2c.dr.read().bits() as u8;
         Ok(value)
     }
-}
 
-impl<I2C, PINS> WriteRead for I2c<I2C, PINS>
-where
-    I2C: Instance,
-{
-    type Error = Error;
-
-    fn write_read(&mut self, addr: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
-        self.write_bytes(addr, bytes)?;
-        self.read(addr, buffer)?;
-
-        Ok(())
-    }
-}
-
-impl<I2C, PINS> Write for I2c<I2C, PINS>
-where
-    I2C: Instance,
-{
-    type Error = Error;
-
-    fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.write_bytes(addr, bytes)?;
-
-        // Send a STOP condition
-        self.i2c.cr1.modify(|_, w| w.stop().set_bit());
-
-        // Wait for STOP condition to transmit.
-        while self.i2c.cr1.read().stop().bit_is_set() {}
-
-        // Fallthrough is success
-        Ok(())
-    }
-}
-
-impl<I2C, PINS> Read for I2c<I2C, PINS>
-where
-    I2C: Instance,
-{
-    type Error = Error;
-
-    fn read(&mut self, addr: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+    pub fn read(&mut self, addr: u8, buffer: &mut [u8]) -> Result<(), Error> {
         if let Some((last, buffer)) = buffer.split_last_mut() {
             // Send a START condition and set ACK bit
             self.i2c
@@ -401,12 +396,10 @@ where
             while self.i2c.sr1.read().sb().bit_is_clear() {}
 
             // Also wait until signalled we're master and everything is waiting for us
-            loop {
+            while {
                 let sr2 = self.i2c.sr2.read();
-                if !(sr2.msl().bit_is_clear() && sr2.busy().bit_is_clear()) {
-                    break;
-                }
-            }
+                sr2.msl().bit_is_clear() && sr2.busy().bit_is_clear()
+            } {}
 
             // Set up current address, we're trying to talk to
             self.i2c
@@ -415,7 +408,8 @@ where
 
             // Wait until address was sent
             loop {
-                self.check_and_clear_error_flags()?;
+                self.check_and_clear_error_flags()
+                    .map_err(Error::nack_addr)?;
                 if self.i2c.sr1.read().addr().bit_is_set() {
                     break;
                 }
@@ -443,7 +437,49 @@ where
             // Fallthrough is success
             Ok(())
         } else {
-            Err(Error::OVERRUN)
+            Err(Error::Overrun)
         }
+    }
+
+    pub fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
+        self.write_bytes(addr, bytes.iter().cloned())?;
+
+        // Send a STOP condition
+        self.i2c.cr1.modify(|_, w| w.stop().set_bit());
+
+        // Wait for STOP condition to transmit.
+        while self.i2c.cr1.read().stop().bit_is_set() {}
+
+        // Fallthrough is success
+        Ok(())
+    }
+
+    pub fn write_iter<B>(&mut self, addr: u8, bytes: B) -> Result<(), Error>
+    where
+        B: IntoIterator<Item = u8>,
+    {
+        self.write_bytes(addr, bytes.into_iter())?;
+
+        // Send a STOP condition
+        self.i2c.cr1.modify(|_, w| w.stop().set_bit());
+
+        // Wait for STOP condition to transmit.
+        while self.i2c.cr1.read().stop().bit_is_set() {}
+
+        // Fallthrough is success
+        Ok(())
+    }
+
+    pub fn write_read(&mut self, addr: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
+        self.write_bytes(addr, bytes.iter().cloned())?;
+        self.read(addr, buffer)
+    }
+
+    pub fn write_iter_read<B>(&mut self, addr: u8, bytes: B, buffer: &mut [u8]) -> Result<(), Error>
+    where
+        B: IntoIterator<Item = u8>,
+    {
+        self.write_bytes(addr, bytes.into_iter())?;
+        self.read(addr, buffer)
     }
 }

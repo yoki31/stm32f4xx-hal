@@ -24,6 +24,7 @@
 //!
 //! - **Alternate**: Pin mode required when the pin is driven by other peripherals
 //! - **Analog**: Analog input to be used with ADC.
+//! - **Dynamic**: Pin mode is selected at runtime. See changing configurations for more details
 //! - Input
 //!     - **PullUp**: Input connected to high with a weak pull up resistor. Will be high when nothing
 //!     is connected
@@ -42,28 +43,41 @@
 //! If you need a more temporary mode change, and can not use the `into_<mode>` functions for
 //! ownership reasons, you can use the closure based `with_<mode>` functions to temporarily change the pin type, do
 //! some output or input, and then have it change back once done.
+//!
+//! ### Dynamic Mode Change
+//! The above mode change methods guarantee that you can only call input functions when the pin is
+//! in input mode, and output when in output modes, but can lead to some issues. Therefore, there
+//! is also a mode where the state is kept track of at runtime, allowing you to change the mode
+//! often, and without problems with ownership, or references, at the cost of some performance and
+//! the risk of runtime errors.
+//!
+//! To make a pin dynamic, use the `into_dynamic` function, and then use the `make_<mode>` functions to
+//! change the mode
 
-use core::convert::Infallible;
 use core::marker::PhantomData;
-
-pub use embedded_hal::digital::v2::PinState;
-use embedded_hal::digital::v2::{
-    InputPin, IoPin, OutputPin, StatefulOutputPin, ToggleableOutputPin,
-};
-
-use crate::pac::EXTI;
-use crate::syscfg::SysCfg;
 
 mod alt;
 pub(crate) use alt::{Const, PinA, SetAlternate};
 mod convert;
-use convert::PinMode;
+pub use convert::PinMode;
 mod partially_erased;
 pub use partially_erased::{PEPin, PartiallyErasedPin};
 mod erased;
 pub use erased::{EPin, ErasedPin};
+mod exti;
+pub use exti::ExtiPin;
+mod dynamic;
+pub use dynamic::{Dynamic, DynamicPin};
+mod hal_02;
+mod hal_1;
+
+pub use embedded_hal::digital::v2::PinState;
+
+use core::fmt;
 
 /// A filler pin type
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NoPin;
 
 /// Extension trait to split a GPIO peripheral in independent pins and registers
@@ -75,54 +89,39 @@ pub trait GpioExt {
     fn split(self) -> Self::Parts;
 }
 
+/// Id, port and mode for any pin
 pub trait PinExt {
+    /// Current pin mode
     type Mode;
-    /// Return pin number
+    /// Pin number
     fn pin_id(&self) -> u8;
-    /// Return port number
+    /// Port number starting from 0
     fn port_id(&self) -> u8;
 }
 
 /// Some alternate mode (type state)
-pub struct Alternate<Otype, const A: u8>(PhantomData<Otype>);
-
-// Compatibility constants
-pub const AF0: u8 = 0;
-pub const AF1: u8 = 1;
-pub const AF2: u8 = 2;
-pub const AF3: u8 = 3;
-pub const AF4: u8 = 4;
-pub const AF5: u8 = 5;
-pub const AF6: u8 = 6;
-pub const AF7: u8 = 7;
-pub const AF8: u8 = 8;
-pub const AF9: u8 = 9;
-pub const AF10: u8 = 10;
-pub const AF11: u8 = 11;
-pub const AF12: u8 = 12;
-pub const AF13: u8 = 13;
-pub const AF14: u8 = 14;
-pub const AF15: u8 = 15;
+pub struct Alternate<const A: u8, Otype = PushPull>(PhantomData<Otype>);
 
 /// Input mode (type state)
-pub struct Input<MODE> {
-    _mode: PhantomData<MODE>,
+pub struct Input;
+
+/// Pull setting for an input.
+#[derive(Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Pull {
+    /// Floating
+    None = 0,
+    /// Pulled up
+    Up = 1,
+    /// Pulled down
+    Down = 2,
 }
-
-/// Floating input (type state)
-pub struct Floating;
-
-/// Pulled down input (type state)
-pub struct PullDown;
-
-/// Pulled up input (type state)
-pub struct PullUp;
 
 /// Open drain input or output (type state)
 pub struct OpenDrain;
 
 /// Output mode (type state)
-pub struct Output<MODE> {
+pub struct Output<MODE = PushPull> {
     _mode: PhantomData<MODE>,
 }
 
@@ -132,145 +131,124 @@ pub struct PushPull;
 /// Analog mode (type state)
 pub struct Analog;
 
+/// JTAG/SWD mote (type state)
+pub type Debugger = Alternate<0, PushPull>;
+
+mod marker {
+    /// Marker trait that show if `ExtiPin` can be implemented
+    pub trait Interruptable {}
+    /// Marker trait for readable pin modes
+    pub trait Readable {}
+    /// Marker trait for slew rate configurable pin modes
+    pub trait OutputSpeed {}
+    /// Marker trait for active pin modes
+    pub trait Active {}
+    /// Marker trait for all pin modes except alternate
+    pub trait NotAlt {}
+    /// Marker trait for pins with alternate function `A` mapping
+    pub trait IntoAf<const A: u8> {}
+}
+
+impl<MODE> marker::Interruptable for Output<MODE> {}
+impl marker::Interruptable for Input {}
+impl marker::Readable for Input {}
+impl marker::Readable for Output<OpenDrain> {}
+impl marker::Active for Input {}
+impl<Otype> marker::OutputSpeed for Output<Otype> {}
+impl<const A: u8, Otype> marker::OutputSpeed for Alternate<A, Otype> {}
+impl<Otype> marker::Active for Output<Otype> {}
+impl<const A: u8, Otype> marker::Active for Alternate<A, Otype> {}
+impl marker::NotAlt for Input {}
+impl<Otype> marker::NotAlt for Output<Otype> {}
+impl marker::NotAlt for Analog {}
+
 /// GPIO Pin speed selection
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Speed {
+    /// Low speed
     Low = 0,
+    /// Medium speed
     Medium = 1,
+    /// High speed
     High = 2,
+    /// Very high speed
     VeryHigh = 3,
 }
 
+/// GPIO interrupt trigger edge selection
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Edge {
+    /// Rising edge of voltage
     Rising,
+    /// Falling edge of voltage
     Falling,
+    /// Rising and falling edge of voltage
     RisingFalling,
 }
 
-mod sealed {
-    /// Marker trait that show if `ExtiPin` can be implemented
-    pub trait Interruptable {}
+macro_rules! af {
+    ($($i:literal: $AFi:ident),+) => {
+        $(
+            #[doc = concat!("Alternate function ", $i, " (type state)" )]
+            pub type $AFi<Otype = PushPull> = Alternate<$i, Otype>;
+        )+
+    };
 }
 
-use sealed::Interruptable;
-impl<MODE> Interruptable for Output<MODE> {}
-impl<MODE> Interruptable for Input<MODE> {}
-
-/// External Interrupt Pin
-pub trait ExtiPin {
-    fn make_interrupt_source(&mut self, syscfg: &mut SysCfg);
-    fn trigger_on_edge(&mut self, exti: &mut EXTI, level: Edge);
-    fn enable_interrupt(&mut self, exti: &mut EXTI);
-    fn disable_interrupt(&mut self, exti: &mut EXTI);
-    fn clear_interrupt_pending_bit(&mut self);
-    fn check_interrupt(&self) -> bool;
-}
-
-impl<PIN> ExtiPin for PIN
-where
-    PIN: PinExt,
-    PIN::Mode: Interruptable,
-{
-    /// Make corresponding EXTI line sensitive to this pin
-    #[inline(always)]
-    fn make_interrupt_source(&mut self, syscfg: &mut SysCfg) {
-        let i = self.pin_id();
-        let port = self.port_id() as u32;
-        let offset = 4 * (i % 4);
-        match i {
-            0..=3 => {
-                syscfg.exticr1.modify(|r, w| unsafe {
-                    w.bits((r.bits() & !(0xf << offset)) | (port << offset))
-                });
-            }
-            4..=7 => {
-                syscfg.exticr2.modify(|r, w| unsafe {
-                    w.bits((r.bits() & !(0xf << offset)) | (port << offset))
-                });
-            }
-            8..=11 => {
-                syscfg.exticr3.modify(|r, w| unsafe {
-                    w.bits((r.bits() & !(0xf << offset)) | (port << offset))
-                });
-            }
-            12..=15 => {
-                syscfg.exticr4.modify(|r, w| unsafe {
-                    w.bits((r.bits() & !(0xf << offset)) | (port << offset))
-                });
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    /// Generate interrupt on rising edge, falling edge or both
-    #[inline(always)]
-    fn trigger_on_edge(&mut self, exti: &mut EXTI, edge: Edge) {
-        let i = self.pin_id();
-        match edge {
-            Edge::Rising => {
-                exti.rtsr
-                    .modify(|r, w| unsafe { w.bits(r.bits() | (1 << i)) });
-                exti.ftsr
-                    .modify(|r, w| unsafe { w.bits(r.bits() & !(1 << i)) });
-            }
-            Edge::Falling => {
-                exti.ftsr
-                    .modify(|r, w| unsafe { w.bits(r.bits() | (1 << i)) });
-                exti.rtsr
-                    .modify(|r, w| unsafe { w.bits(r.bits() & !(1 << i)) });
-            }
-            Edge::RisingFalling => {
-                exti.rtsr
-                    .modify(|r, w| unsafe { w.bits(r.bits() | (1 << i)) });
-                exti.ftsr
-                    .modify(|r, w| unsafe { w.bits(r.bits() | (1 << i)) });
-            }
-        }
-    }
-
-    /// Enable external interrupts from this pin.
-    #[inline(always)]
-    fn enable_interrupt(&mut self, exti: &mut EXTI) {
-        exti.imr
-            .modify(|r, w| unsafe { w.bits(r.bits() | (1 << self.pin_id())) });
-    }
-
-    /// Disable external interrupts from this pin
-    #[inline(always)]
-    fn disable_interrupt(&mut self, exti: &mut EXTI) {
-        exti.imr
-            .modify(|r, w| unsafe { w.bits(r.bits() & !(1 << self.pin_id())) });
-    }
-
-    /// Clear the interrupt pending bit for this pin
-    #[inline(always)]
-    fn clear_interrupt_pending_bit(&mut self) {
-        unsafe { (*EXTI::ptr()).pr.write(|w| w.bits(1 << self.pin_id())) };
-    }
-
-    /// Reads the interrupt pending bit for this pin
-    #[inline(always)]
-    fn check_interrupt(&self) -> bool {
-        unsafe { ((*EXTI::ptr()).pr.read().bits() & (1 << self.pin_id())) != 0 }
-    }
-}
+af!(
+    0: AF0,
+    1: AF1,
+    2: AF2,
+    3: AF3,
+    4: AF4,
+    5: AF5,
+    6: AF6,
+    7: AF7,
+    8: AF8,
+    9: AF9,
+    10: AF10,
+    11: AF11,
+    12: AF12,
+    13: AF13,
+    14: AF14,
+    15: AF15
+);
 
 /// Generic pin type
 ///
 /// - `MODE` is one of the pin modes (see [Modes](crate::gpio#modes) section).
 /// - `P` is port name: `A` for GPIOA, `B` for GPIOB, etc.
 /// - `N` is pin number: from `0` to `15`.
-pub struct Pin<MODE, const P: char, const N: u8> {
+pub struct Pin<const P: char, const N: u8, MODE = Input> {
     _mode: PhantomData<MODE>,
 }
-impl<MODE, const P: char, const N: u8> Pin<MODE, P, N> {
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
     const fn new() -> Self {
         Self { _mode: PhantomData }
     }
 }
 
-impl<MODE, const P: char, const N: u8> PinExt for Pin<MODE, P, N> {
+impl<const P: char, const N: u8, MODE> fmt::Debug for Pin<P, N, MODE> {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_fmt(format_args!(
+            "P{}{}<{}>",
+            P,
+            N,
+            crate::stripped_type_name::<MODE>()
+        ))
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl<const P: char, const N: u8, MODE> defmt::Format for Pin<P, N, MODE> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "P{}{}<{}>", P, N, crate::stripped_type_name::<MODE>());
+    }
+}
+
+impl<const P: char, const N: u8, MODE> PinExt for Pin<P, N, MODE> {
     type Mode = MODE;
 
     #[inline(always)]
@@ -283,95 +261,87 @@ impl<MODE, const P: char, const N: u8> PinExt for Pin<MODE, P, N> {
     }
 }
 
-impl<MODE, const P: char, const N: u8> Pin<Output<MODE>, P, N> {
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: marker::OutputSpeed,
+{
     /// Set pin speed
-    pub fn set_speed(self, speed: Speed) -> Self {
+    pub fn set_speed(&mut self, speed: Speed) {
         let offset = 2 * { N };
 
         unsafe {
             (*Gpio::<P>::ptr())
                 .ospeedr
-                .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | ((speed as u32) << offset)))
-        };
+                .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | ((speed as u32) << offset)));
+        }
+    }
 
+    /// Set pin speed
+    pub fn speed(mut self, speed: Speed) -> Self {
+        self.set_speed(speed);
         self
     }
 }
 
-impl<const P: char, const N: u8> Pin<Output<OpenDrain>, P, N> {
-    /// Enables / disables the internal pull up
-    pub fn internal_pull_up(&mut self, on: bool) {
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: marker::Active,
+{
+    /// Set the internal pull-up and pull-down resistor
+    pub fn set_internal_resistor(&mut self, resistor: Pull) {
         let offset = 2 * { N };
-        let value = if on { 0b01 } else { 0b00 };
+        let value = resistor as u32;
         unsafe {
             (*Gpio::<P>::ptr())
                 .pupdr
-                .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (value << offset)))
-        };
+                .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (value << offset)));
+        }
     }
-}
 
-impl<const P: char, const N: u8, const A: u8> Pin<Alternate<PushPull, A>, P, N> {
-    /// Set pin speed
-    pub fn set_speed(self, speed: Speed) -> Self {
-        let offset = 2 * { N };
-
-        unsafe {
-            (*Gpio::<P>::ptr())
-                .ospeedr
-                .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | ((speed as u32) << offset)))
-        };
-
+    /// Set the internal pull-up and pull-down resistor
+    pub fn internal_resistor(mut self, resistor: Pull) -> Self {
+        self.set_internal_resistor(resistor);
         self
     }
 
     /// Enables / disables the internal pull up
     pub fn internal_pull_up(self, on: bool) -> Self {
-        let offset = 2 * { N };
-        let value = if on { 0b01 } else { 0b00 };
-        unsafe {
-            (*Gpio::<P>::ptr())
-                .pupdr
-                .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (value << offset)))
-        };
+        if on {
+            self.internal_resistor(Pull::Up)
+        } else {
+            self.internal_resistor(Pull::None)
+        }
+    }
 
-        self
+    /// Enables / disables the internal pull down
+    pub fn internal_pull_down(self, on: bool) -> Self {
+        if on {
+            self.internal_resistor(Pull::Down)
+        } else {
+            self.internal_resistor(Pull::None)
+        }
     }
 }
 
-impl<const P: char, const N: u8, const A: u8> Pin<Alternate<PushPull, A>, P, N> {
-    /// Turns pin alternate configuration pin into open drain
-    pub fn set_open_drain(self) -> Pin<Alternate<OpenDrain, A>, P, N> {
-        let offset = { N };
-        unsafe {
-            (*Gpio::<P>::ptr())
-                .otyper
-                .modify(|r, w| w.bits(r.bits() | (1 << offset)))
-        };
-
-        Pin::new()
-    }
-}
-
-impl<MODE, const P: char, const N: u8> Pin<MODE, P, N> {
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
     /// Erases the pin number from the type
     ///
     /// This is useful when you want to collect the pins into an array where you
     /// need all the elements to have the same type
-    pub fn erase_number(self) -> PEPin<MODE, P> {
-        PEPin::new(N)
+    pub fn erase_number(self) -> PartiallyErasedPin<P, MODE> {
+        PartiallyErasedPin::new(N)
     }
 
     /// Erases the pin number and the port from the type
     ///
     /// This is useful when you want to collect the pins into an array where you
     /// need all the elements to have the same type
-    pub fn erase(self) -> EPin<MODE> {
-        EPin::new(P as u8 - b'A', N)
+    pub fn erase(self) -> ErasedPin<MODE> {
+        ErasedPin::new(P as u8 - b'A', N)
     }
 }
 
-impl<MODE, const P: char, const N: u8> Pin<MODE, P, N> {
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
     /// Set the output of the pin regardless of its mode.
     /// Primarily used to set the output value of the pin
     /// before changing its mode to an output to avoid
@@ -405,17 +375,20 @@ impl<MODE, const P: char, const N: u8> Pin<MODE, P, N> {
     }
 }
 
-impl<MODE, const P: char, const N: u8> Pin<Output<MODE>, P, N> {
+impl<const P: char, const N: u8, MODE> Pin<P, N, Output<MODE>> {
+    /// Drives the pin high
     #[inline(always)]
     pub fn set_high(&mut self) {
         self._set_high()
     }
 
+    /// Drives the pin low
     #[inline(always)]
     pub fn set_low(&mut self) {
         self._set_low()
     }
 
+    /// Is the pin in drive high or low mode?
     #[inline(always)]
     pub fn get_state(&self) -> PinState {
         if self.is_set_low() {
@@ -425,6 +398,7 @@ impl<MODE, const P: char, const N: u8> Pin<Output<MODE>, P, N> {
         }
     }
 
+    /// Drives the pin high or low depending on the provided value
     #[inline(always)]
     pub fn set_state(&mut self, state: PinState) {
         match state {
@@ -433,16 +407,19 @@ impl<MODE, const P: char, const N: u8> Pin<Output<MODE>, P, N> {
         }
     }
 
+    /// Is the pin in drive high mode?
     #[inline(always)]
     pub fn is_set_high(&self) -> bool {
         !self.is_set_low()
     }
 
+    /// Is the pin in drive low mode?
     #[inline(always)]
     pub fn is_set_low(&self) -> bool {
         self._is_set_low()
     }
 
+    /// Toggle pin output
     #[inline(always)]
     pub fn toggle(&mut self) {
         if self.is_set_low() {
@@ -453,224 +430,37 @@ impl<MODE, const P: char, const N: u8> Pin<Output<MODE>, P, N> {
     }
 }
 
-impl<MODE, const P: char, const N: u8> OutputPin for Pin<Output<MODE>, P, N> {
-    type Error = Infallible;
-
-    #[inline(always)]
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        self.set_high();
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        self.set_low();
-        Ok(())
-    }
-}
-
-impl<MODE, const P: char, const N: u8> StatefulOutputPin for Pin<Output<MODE>, P, N> {
-    #[inline(always)]
-    fn is_set_high(&self) -> Result<bool, Self::Error> {
-        Ok(self.is_set_high())
-    }
-
-    #[inline(always)]
-    fn is_set_low(&self) -> Result<bool, Self::Error> {
-        Ok(self.is_set_low())
-    }
-}
-
-impl<MODE, const P: char, const N: u8> ToggleableOutputPin for Pin<Output<MODE>, P, N> {
-    type Error = Infallible;
-
-    #[inline(always)]
-    fn toggle(&mut self) -> Result<(), Self::Error> {
-        self.toggle();
-        Ok(())
-    }
-}
-
-impl<const P: char, const N: u8> Pin<Output<OpenDrain>, P, N> {
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: marker::Readable,
+{
+    /// Is the input pin high?
     #[inline(always)]
     pub fn is_high(&self) -> bool {
         !self.is_low()
     }
 
+    /// Is the input pin low?
     #[inline(always)]
     pub fn is_low(&self) -> bool {
         self._is_low()
-    }
-}
-
-impl<const P: char, const N: u8> InputPin for Pin<Output<OpenDrain>, P, N> {
-    type Error = Infallible;
-
-    #[inline(always)]
-    fn is_high(&self) -> Result<bool, Self::Error> {
-        Ok(self.is_high())
-    }
-
-    #[inline(always)]
-    fn is_low(&self) -> Result<bool, Self::Error> {
-        Ok(self.is_low())
-    }
-}
-
-impl<MODE, const P: char, const N: u8> Pin<Input<MODE>, P, N> {
-    #[inline(always)]
-    pub fn is_high(&self) -> bool {
-        !self.is_low()
-    }
-
-    #[inline(always)]
-    pub fn is_low(&self) -> bool {
-        self._is_low()
-    }
-}
-
-impl<MODE, const P: char, const N: u8> InputPin for Pin<Input<MODE>, P, N> {
-    type Error = Infallible;
-
-    #[inline(always)]
-    fn is_high(&self) -> Result<bool, Self::Error> {
-        Ok(self.is_high())
-    }
-
-    #[inline(always)]
-    fn is_low(&self) -> Result<bool, Self::Error> {
-        Ok(self.is_low())
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Self, Self> for Pin<Output<OpenDrain>, P, N> {
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-    fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
-        self.set_state(state);
-        Ok(self)
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Pin<Input<Floating>, P, N>, Self>
-    for Pin<Output<OpenDrain>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Pin<Input<Floating>, P, N>, Self::Error> {
-        Ok(self.into_floating_input())
-    }
-    fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
-        self.set_state(state);
-        Ok(self)
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Self, Pin<Output<OpenDrain>, P, N>>
-    for Pin<Input<Floating>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-    fn into_output_pin(self, state: PinState) -> Result<Pin<Output<OpenDrain>, P, N>, Self::Error> {
-        Ok(self.into_open_drain_output_in_state(state))
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Pin<Input<Floating>, P, N>, Self>
-    for Pin<Output<PushPull>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Pin<Input<Floating>, P, N>, Self::Error> {
-        Ok(self.into_floating_input())
-    }
-    fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
-        self.set_state(state);
-        Ok(self)
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Self, Pin<Output<PushPull>, P, N>>
-    for Pin<Input<Floating>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-    fn into_output_pin(self, state: PinState) -> Result<Pin<Output<PushPull>, P, N>, Self::Error> {
-        Ok(self.into_push_pull_output_in_state(state))
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Pin<Input<PullUp>, P, N>, Self>
-    for Pin<Output<PushPull>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Pin<Input<PullUp>, P, N>, Self::Error> {
-        Ok(self.into_pull_up_input())
-    }
-    fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
-        self.set_state(state);
-        Ok(self)
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Self, Pin<Output<PushPull>, P, N>>
-    for Pin<Input<PullUp>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-    fn into_output_pin(self, state: PinState) -> Result<Pin<Output<PushPull>, P, N>, Self::Error> {
-        Ok(self.into_push_pull_output_in_state(state))
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Pin<Input<PullDown>, P, N>, Self>
-    for Pin<Output<PushPull>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Pin<Input<PullDown>, P, N>, Self::Error> {
-        Ok(self.into_pull_down_input())
-    }
-    fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
-        self.set_state(state);
-        Ok(self)
-    }
-}
-
-impl<const P: char, const N: u8> IoPin<Self, Pin<Output<PushPull>, P, N>>
-    for Pin<Input<PullDown>, P, N>
-{
-    type Error = Infallible;
-    fn into_input_pin(self) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-    fn into_output_pin(self, state: PinState) -> Result<Pin<Output<PushPull>, P, N>, Self::Error> {
-        Ok(self.into_push_pull_output_in_state(state))
     }
 }
 
 macro_rules! gpio {
     ($GPIOX:ident, $gpiox:ident, $PEPin:ident, $port_id:expr, $PXn:ident, [
-        $($PXi:ident: ($pxi:ident, $i:expr, $MODE:ty),)+
+        $($PXi:ident: ($pxi:ident, $i:expr, [$($A:literal),*] $(, $MODE:ty)?),)+
     ]) => {
         /// GPIO
         pub mod $gpiox {
             use crate::pac::{$GPIOX, RCC};
             use crate::rcc::{Enable, Reset};
-            use super::{
-                Floating, Input,
-            };
 
             /// GPIO parts
             pub struct Parts {
                 $(
                     /// Pin
-                    pub $pxi: $PXi<$MODE>,
+                    pub $pxi: $PXi $(<$MODE>)?,
                 )+
             }
 
@@ -694,230 +484,1345 @@ macro_rules! gpio {
                 }
             }
 
-            pub type $PXn<MODE> = super::PEPin<MODE, $port_id>;
+            #[doc="Common type for "]
+            #[doc=stringify!($GPIOX)]
+            #[doc=" related pins"]
+            pub type $PXn<MODE> = super::PartiallyErasedPin<$port_id, MODE>;
 
             $(
-                pub type $PXi<MODE> = super::Pin<MODE, $port_id, $i>;
+                #[doc=stringify!($PXi)]
+                #[doc=" pin"]
+                pub type $PXi<MODE = super::Input> = super::Pin<$port_id, $i, MODE>;
+
+                $(
+                    impl<MODE> super::marker::IntoAf<$A> for $PXi<MODE> { }
+                )*
             )+
 
         }
+
+        pub use $gpiox::{ $($PXi,)+ };
     }
 }
 
+#[cfg(feature = "gpio-f401")]
 gpio!(GPIOA, gpioa, PA, 'A', PAn, [
-    PA0: (pa0, 0, Input<Floating>),
-    PA1: (pa1, 1, Input<Floating>),
-    PA2: (pa2, 2, Input<Floating>),
-    PA3: (pa3, 3, Input<Floating>),
-    PA4: (pa4, 4, Input<Floating>),
-    PA5: (pa5, 5, Input<Floating>),
-    PA6: (pa6, 6, Input<Floating>),
-    PA7: (pa7, 7, Input<Floating>),
-    PA8: (pa8, 8, Input<Floating>),
-    PA9: (pa9, 9, Input<Floating>),
-    PA10: (pa10, 10, Input<Floating>),
-    PA11: (pa11, 11, Input<Floating>),
-    PA12: (pa12, 12, Input<Floating>),
-    PA13: (pa13, 13, Input<Floating>),
-    PA14: (pa14, 14, Input<Floating>),
-    PA15: (pa15, 15, Input<Floating>),
+    PA0: (pa0, 0, [1, 2, 7]),
+    PA1: (pa1, 1, [1, 2, 7]),
+    PA2: (pa2, 2, [1, 2, 3, 7]),
+    PA3: (pa3, 3, [1, 2, 3, 7]),
+    PA4: (pa4, 4, [5, 6, 7]),
+    PA5: (pa5, 5, [1, 5]),
+    PA6: (pa6, 6, [1, 2, 5]),
+    PA7: (pa7, 7, [1, 2, 5]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10]),
+    PA9: (pa9, 9, [1, 4, 7]),
+    PA10: (pa10, 10, [1, 7, 10]),
+    PA11: (pa11, 11, [1, 7, 8, 10]),
+    PA12: (pa12, 12, [1, 7, 8, 10]),
+    PA13: (pa13, 13, [0], super::Debugger), // SWDIO, PullUp VeryHigh speed
+    PA14: (pa14, 14, [0, 5], super::Debugger), // SWCLK, PullDown
+    PA15: (pa15, 15, [0, 1, 5, 6], super::Debugger), // JTDI, PullUp
 ]);
 
+#[cfg(feature = "gpio-f401")]
 gpio!(GPIOB, gpiob, PB, 'B', PBn, [
-    PB0: (pb0, 0, Input<Floating>),
-    PB1: (pb1, 1, Input<Floating>),
-    PB2: (pb2, 2, Input<Floating>),
-    PB3: (pb3, 3, Input<Floating>),
-    PB4: (pb4, 4, Input<Floating>),
-    PB5: (pb5, 5, Input<Floating>),
-    PB6: (pb6, 6, Input<Floating>),
-    PB7: (pb7, 7, Input<Floating>),
-    PB8: (pb8, 8, Input<Floating>),
-    PB9: (pb9, 9, Input<Floating>),
-    PB10: (pb10, 10, Input<Floating>),
-    PB11: (pb11, 11, Input<Floating>),
-    PB12: (pb12, 12, Input<Floating>),
-    PB13: (pb13, 13, Input<Floating>),
-    PB14: (pb14, 14, Input<Floating>),
-    PB15: (pb15, 15, Input<Floating>),
+    PB0: (pb0, 0, [1, 2]),
+    PB1: (pb1, 1, [1, 2]),
+    PB2: (pb2, 2, []),
+    PB3: (pb3, 3, [0, 1, 5, 6, 9], super::Debugger), // SWO, VeryHigh speed
+    PB4: (pb4, 4, [0, 2, 5, 6, 7, 9], super::Debugger), // JTRST, PullUp
+    PB5: (pb5, 5, [2, 4, 5, 6]),
+    PB6: (pb6, 6, [2, 4, 7]),
+    PB7: (pb7, 7, [2, 4, 7]),
+    PB8: (pb8, 8, [2, 3, 4, 12]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 12]),
+    PB10: (pb10, 10, [1, 4, 5]),
+    PB11: (pb11, 11, [1, 4]),
+    PB12: (pb12, 12, [1, 4, 5, 6]),
+    PB13: (pb13, 13, [1, 5, 6]),
+    PB14: (pb14, 14, [1, 5, 6]),
+    PB15: (pb15, 15, [0, 1, 5, 6]),
 ]);
 
+#[cfg(feature = "gpio-f401")]
 gpio!(GPIOC, gpioc, PC, 'C', PCn, [
-    PC0: (pc0, 0, Input<Floating>),
-    PC1: (pc1, 1, Input<Floating>),
-    PC2: (pc2, 2, Input<Floating>),
-    PC3: (pc3, 3, Input<Floating>),
-    PC4: (pc4, 4, Input<Floating>),
-    PC5: (pc5, 5, Input<Floating>),
-    PC6: (pc6, 6, Input<Floating>),
-    PC7: (pc7, 7, Input<Floating>),
-    PC8: (pc8, 8, Input<Floating>),
-    PC9: (pc9, 9, Input<Floating>),
-    PC10: (pc10, 10, Input<Floating>),
-    PC11: (pc11, 11, Input<Floating>),
-    PC12: (pc12, 12, Input<Floating>),
-    PC13: (pc13, 13, Input<Floating>),
-    PC14: (pc14, 14, Input<Floating>),
-    PC15: (pc15, 15, Input<Floating>),
+    PC0: (pc0, 0, []),
+    PC1: (pc1, 1, []),
+    PC2: (pc2, 2, [5, 6]),
+    PC3: (pc3, 3, [5]),
+    PC4: (pc4, 4, []),
+    PC5: (pc5, 5, []),
+    PC6: (pc6, 6, [2, 5, 8, 12]),
+    PC7: (pc7, 7, [2, 6, 8, 12]),
+    PC8: (pc8, 8, [2, 8, 12]),
+    PC9: (pc9, 9, [0, 2, 4, 5, 12]),
+    PC10: (pc10, 10, [5, 6, 12]),
+    PC11: (pc11, 11, [5, 6, 12]),
+    PC12: (pc12, 12, [5, 6, 12]),
+    PC13: (pc13, 13, []),
+    PC14: (pc14, 14, []),
+    PC15: (pc15, 15, []),
 ]);
 
-#[cfg(feature = "gpiod")]
+#[cfg(feature = "gpio-f401")]
 gpio!(GPIOD, gpiod, PD, 'D', PDn, [
-    PD0: (pd0, 0, Input<Floating>),
-    PD1: (pd1, 1, Input<Floating>),
-    PD2: (pd2, 2, Input<Floating>),
-    PD3: (pd3, 3, Input<Floating>),
-    PD4: (pd4, 4, Input<Floating>),
-    PD5: (pd5, 5, Input<Floating>),
-    PD6: (pd6, 6, Input<Floating>),
-    PD7: (pd7, 7, Input<Floating>),
-    PD8: (pd8, 8, Input<Floating>),
-    PD9: (pd9, 9, Input<Floating>),
-    PD10: (pd10, 10, Input<Floating>),
-    PD11: (pd11, 11, Input<Floating>),
-    PD12: (pd12, 12, Input<Floating>),
-    PD13: (pd13, 13, Input<Floating>),
-    PD14: (pd14, 14, Input<Floating>),
-    PD15: (pd15, 15, Input<Floating>),
+    PD0: (pd0, 0, []),
+    PD1: (pd1, 1, []),
+    PD2: (pd2, 2, [2, 12]),
+    PD3: (pd3, 3, [5, 7]),
+    PD4: (pd4, 4, [7]),
+    PD5: (pd5, 5, [7]),
+    PD6: (pd6, 6, [5, 7]),
+    PD7: (pd7, 7, [7]),
+    PD8: (pd8, 8, []),
+    PD9: (pd9, 9, []),
+    PD10: (pd10, 10, []),
+    PD11: (pd11, 11, []),
+    PD12: (pd12, 12, [2]),
+    PD13: (pd13, 13, [2]),
+    PD14: (pd14, 14, [2]),
+    PD15: (pd15, 15, [2]),
 ]);
 
-#[cfg(feature = "gpioe")]
+#[cfg(feature = "gpio-f401")]
 gpio!(GPIOE, gpioe, PE, 'E', PEn, [
-    PE0: (pe0, 0, Input<Floating>),
-    PE1: (pe1, 1, Input<Floating>),
-    PE2: (pe2, 2, Input<Floating>),
-    PE3: (pe3, 3, Input<Floating>),
-    PE4: (pe4, 4, Input<Floating>),
-    PE5: (pe5, 5, Input<Floating>),
-    PE6: (pe6, 6, Input<Floating>),
-    PE7: (pe7, 7, Input<Floating>),
-    PE8: (pe8, 8, Input<Floating>),
-    PE9: (pe9, 9, Input<Floating>),
-    PE10: (pe10, 10, Input<Floating>),
-    PE11: (pe11, 11, Input<Floating>),
-    PE12: (pe12, 12, Input<Floating>),
-    PE13: (pe13, 13, Input<Floating>),
-    PE14: (pe14, 14, Input<Floating>),
-    PE15: (pe15, 15, Input<Floating>),
+    PE0: (pe0, 0, [2]),
+    PE1: (pe1, 1, []),
+    PE2: (pe2, 2, [0, 5]),
+    PE3: (pe3, 3, [0]),
+    PE4: (pe4, 4, [0, 5]),
+    PE5: (pe5, 5, [0, 3, 5]),
+    PE6: (pe6, 6, [0, 3, 5]),
+    PE7: (pe7, 7, [1]),
+    PE8: (pe8, 8, [1]),
+    PE9: (pe9, 9, [1]),
+    PE10: (pe10, 10, [1]),
+    PE11: (pe11, 11, [1, 5]),
+    PE12: (pe12, 12, [1, 5]),
+    PE13: (pe13, 13, [1, 5]),
+    PE14: (pe14, 14, [1, 5]),
+    PE15: (pe15, 15, [1]),
 ]);
 
-#[cfg(feature = "gpiof")]
+#[cfg(feature = "gpio-f401")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, []),
+    PH1: (ph1, 1, []),
+]);
+
+#[cfg(feature = "gpio-f410")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [2, 7, 15]),
+    PA1: (pa1, 1, [2, 7, 15]),
+    PA2: (pa2, 2, [2, 3, 5, 7, 15]),
+    PA3: (pa3, 3, [2, 3, 5, 7, 15]),
+    PA4: (pa4, 4, [5, 7, 15]),
+    PA5: (pa5, 5, [5, 15]),
+    PA6: (pa6, 6, [1, 5, 6, 15]),
+    PA7: (pa7, 7, [1, 5, 15]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 15]),
+    PA9: (pa9, 9, [1, 7, 15]),
+    PA10: (pa10, 10, [1, 6, 7, 15]),
+    PA11: (pa11, 11, [1, 7, 8, 15]),
+    PA12: (pa12, 12, [1, 6, 7, 8, 15]),
+    PA13: (pa13, 13, [0, 15], super::Debugger),
+    PA14: (pa14, 14, [0, 15], super::Debugger),
+    PA15: (pa15, 15, [0, 5, 7, 15], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f410")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 6, 15]),
+    PB1: (pb1, 1, [1, 6, 15]),
+    PB2: (pb2, 2, [1, 15]),
+    PB3: (pb3, 3, [0, 4, 5, 7, 9, 15], super::Debugger),
+    PB4: (pb4, 4, [0, 5, 15], super::Debugger),
+    PB5: (pb5, 5, [1, 4, 5, 15]),
+    PB6: (pb6, 6, [1, 4, 7, 15]),
+    PB7: (pb7, 7, [1, 4, 7, 15]),
+    PB8: (pb8, 8, [1, 4, 6, 15]),
+    PB9: (pb9, 9, [3, 4, 5, 9, 15]),
+    PB10: (pb10, 10, [4, 5, 6, 9, 15]),
+    PB11: (pb11, 11, [0, 2, 4, 5, 15]),
+    PB12: (pb12, 12, [1, 2, 4, 5, 15]),
+    PB13: (pb13, 13, [1, 4, 5, 15]),
+    PB14: (pb14, 14, [1, 4, 5, 15]),
+    PB15: (pb15, 15, [0, 1, 4, 5, 15]),
+]);
+
+#[cfg(feature = "gpio-f410")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [1, 15]),
+    PC1: (pc1, 1, [1, 15]),
+    PC2: (pc2, 2, [1, 5, 15]),
+    PC3: (pc3, 3, [1, 5, 15]),
+    PC4: (pc4, 4, [3, 15]),
+    PC5: (pc5, 5, [3, 4, 15]),
+    PC6: (pc6, 6, [0, 4, 5, 8, 15]),
+    PC7: (pc7, 7, [4, 5, 6, 8, 15]),
+    PC8: (pc8, 8, [8, 15]),
+    PC9: (pc9, 9, [0, 4, 5, 15]),
+    PC10: (pc10, 10, [0, 2, 15]),
+    PC11: (pc11, 11, [0, 2, 15]),
+    PC12: (pc12, 12, [0, 3, 15]),
+    PC13: (pc13, 13, [15]),
+    PC14: (pc14, 14, [15]),
+    PC15: (pc15, 15, [15]),
+]);
+
+#[cfg(feature = "gpio-f410")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, [15]),
+    PH1: (ph1, 1, [15]),
+]);
+
+#[cfg(feature = "gpio-f411")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [1, 2, 7]),
+    PA1: (pa1, 1, [1, 2, 5, 7]),
+    PA2: (pa2, 2, [1, 2, 3, 5, 7]),
+    PA3: (pa3, 3, [1, 2, 3, 5, 7]),
+    PA4: (pa4, 4, [5, 6, 7]),
+    PA5: (pa5, 5, [1, 5]),
+    PA6: (pa6, 6, [1, 2, 5, 6, 12]),
+    PA7: (pa7, 7, [1, 2, 5]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10, 12]),
+    PA9: (pa9, 9, [1, 4, 7, 10, 12]),
+    PA10: (pa10, 10, [1, 6, 7, 10]),
+    PA11: (pa11, 11, [1, 6, 7, 8, 10]),
+    PA12: (pa12, 12, [1, 6, 7, 8, 10]),
+    PA13: (pa13, 13, [0], super::Debugger),
+    PA14: (pa14, 14, [0], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 5, 6, 7], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f411")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 6]),
+    PB1: (pb1, 1, [1, 2, 6]),
+    PB2: (pb2, 2, []),
+    PB3: (pb3, 3, [0, 1, 5, 6, 7, 9], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 5, 6, 7, 9, 12], super::Debugger),
+    PB5: (pb5, 5, [2, 4, 5, 6, 12]),
+    PB6: (pb6, 6, [2, 4, 7]),
+    PB7: (pb7, 7, [2, 4, 7, 12]),
+    PB8: (pb8, 8, [2, 3, 4, 6, 9, 12]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 9, 12]),
+    PB10: (pb10, 10, [1, 4, 5, 6, 12]),
+    PB11: (pb11, 11, [1, 4, 5]),
+    PB12: (pb12, 12, [1, 4, 5, 6, 7]),
+    PB13: (pb13, 13, [1, 5, 6]),
+    PB14: (pb14, 14, [1, 5, 6, 12]),
+    PB15: (pb15, 15, [0, 1, 5, 12]),
+]);
+
+#[cfg(feature = "gpio-f411")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, []),
+    PC1: (pc1, 1, []),
+    PC2: (pc2, 2, [5, 6]),
+    PC3: (pc3, 3, [5]),
+    PC4: (pc4, 4, []),
+    PC5: (pc5, 5, []),
+    PC6: (pc6, 6, [2, 5, 8, 12]),
+    PC7: (pc7, 7, [2, 5, 6, 8, 12]),
+    PC8: (pc8, 8, [2, 8, 12]),
+    PC9: (pc9, 9, [0, 2, 4, 5, 12]),
+    PC10: (pc10, 10, [6, 12]),
+    PC11: (pc11, 11, [5, 6, 12]),
+    PC12: (pc12, 12, [6, 12]),
+    PC13: (pc13, 13, []),
+    PC14: (pc14, 14, []),
+    PC15: (pc15, 15, []),
+]);
+
+#[cfg(feature = "gpio-f411")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, []),
+    PD1: (pd1, 1, []),
+    PD2: (pd2, 2, [2, 12]),
+    PD3: (pd3, 3, [5, 7]),
+    PD4: (pd4, 4, [7]),
+    PD5: (pd5, 5, [7]),
+    PD6: (pd6, 6, [5, 7]),
+    PD7: (pd7, 7, [7]),
+    PD8: (pd8, 8, []),
+    PD9: (pd9, 9, []),
+    PD10: (pd10, 10, []),
+    PD11: (pd11, 11, []),
+    PD12: (pd12, 12, [2]),
+    PD13: (pd13, 13, [2]),
+    PD14: (pd14, 14, [2]),
+    PD15: (pd15, 15, [2]),
+]);
+
+#[cfg(feature = "gpio-f411")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2]),
+    PE1: (pe1, 1, []),
+    PE2: (pe2, 2, [0, 5, 6]),
+    PE3: (pe3, 3, [0]),
+    PE4: (pe4, 4, [0, 5, 6]),
+    PE5: (pe5, 5, [0, 3, 5, 6]),
+    PE6: (pe6, 6, [0, 3, 5, 6]),
+    PE7: (pe7, 7, [1]),
+    PE8: (pe8, 8, [1]),
+    PE9: (pe9, 9, [1]),
+    PE10: (pe10, 10, [1]),
+    PE11: (pe11, 11, [1, 5, 6]),
+    PE12: (pe12, 12, [1, 5, 6]),
+    PE13: (pe13, 13, [1, 5, 6]),
+    PE14: (pe14, 14, [1, 5, 6]),
+    PE15: (pe15, 15, [1]),
+]);
+
+#[cfg(feature = "gpio-f411")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, []),
+    PH1: (ph1, 1, []),
+]);
+
+#[cfg(feature = "gpio-f412")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [1, 2, 3, 7, 15]),
+    PA1: (pa1, 1, [1, 2, 5, 7, 9, 15]),
+    PA2: (pa2, 2, [1, 2, 3, 5, 7, 12, 15]),
+    PA3: (pa3, 3, [1, 2, 3, 5, 7, 12, 15]),
+    PA4: (pa4, 4, [5, 6, 7, 8, 12, 15]),
+    PA5: (pa5, 5, [1, 3, 5, 8, 12, 15]),
+    PA6: (pa6, 6, [1, 2, 3, 5, 6, 9, 10, 12, 15]),
+    PA7: (pa7, 7, [1, 2, 3, 5, 9, 10, 15]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10, 12, 15]),
+    PA9: (pa9, 9, [1, 4, 7, 10, 12, 15]),
+    PA10: (pa10, 10, [1, 6, 7, 10, 15]),
+    PA11: (pa11, 11, [1, 6, 7, 8, 9, 10, 15]),
+    PA12: (pa12, 12, [1, 6, 7, 8, 9, 10, 15]),
+    PA13: (pa13, 13, [0, 15], super::Debugger),
+    PA14: (pa14, 14, [0, 15], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 5, 6, 7, 15], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f412")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 3, 6, 15]),
+    PB1: (pb1, 1, [1, 2, 3, 6, 8, 9, 15]),
+    PB2: (pb2, 2, [6, 9, 15]),
+    PB3: (pb3, 3, [0, 1, 4, 5, 6, 7, 9, 15], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 5, 6, 7, 9, 12, 15], super::Debugger),
+    PB5: (pb5, 5, [2, 4, 5, 6, 9, 12, 15]),
+    PB6: (pb6, 6, [2, 4, 7, 9, 10, 12, 15]),
+    PB7: (pb7, 7, [2, 4, 7, 12, 15]),
+    PB8: (pb8, 8, [2, 3, 4, 6, 8, 9, 12, 15]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 8, 9, 12, 15]),
+    PB10: (pb10, 10, [1, 4, 5, 6, 7, 9, 12, 15]),
+    PB11: (pb11, 11, [1, 4, 5, 7, 15]),
+    PB12: (pb12, 12, [1, 4, 5, 6, 7, 8, 9, 10, 12, 15]),
+    PB13: (pb13, 13, [1, 4, 5, 6, 8, 9, 10, 15]),
+    PB14: (pb14, 14, [1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15]),
+    PB15: (pb15, 15, [0, 1, 3, 4, 5, 8, 9, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f412")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [15]),
+    PC1: (pc1, 1, [15]),
+    PC2: (pc2, 2, [5, 6, 8, 12, 15]),
+    PC3: (pc3, 3, [5, 12, 15]),
+    PC4: (pc4, 4, [5, 10, 12, 15]),
+    PC5: (pc5, 5, [4, 7, 10, 12, 15]),
+    PC6: (pc6, 6, [2, 3, 4, 5, 6, 8, 10, 12, 15]),
+    PC7: (pc7, 7, [2, 3, 4, 5, 6, 8, 10, 12, 15]),
+    PC8: (pc8, 8, [2, 3, 8, 9, 12, 15]),
+    PC9: (pc9, 9, [0, 2, 3, 4, 5, 9, 12, 15]),
+    PC10: (pc10, 10, [6, 7, 9, 12, 15]),
+    PC11: (pc11, 11, [5, 6, 7, 9, 10, 12, 15]),
+    PC12: (pc12, 12, [6, 7, 10, 12, 15]),
+    PC13: (pc13, 13, [15]),
+    PC14: (pc14, 14, [15]),
+    PC15: (pc15, 15, [15]),
+]);
+
+#[cfg(feature = "gpio-f412")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, [9, 12, 15]),
+    PD1: (pd1, 1, [9, 12, 15]),
+    PD2: (pd2, 2, [2, 10, 12, 15]),
+    PD3: (pd3, 3, [0, 5, 6, 7, 9, 12, 15]),
+    PD4: (pd4, 4, [6, 7, 12, 15]),
+    PD5: (pd5, 5, [7, 12, 15]),
+    PD6: (pd6, 6, [5, 6, 7, 12, 15]),
+    PD7: (pd7, 7, [6, 7, 12, 15]),
+    PD8: (pd8, 8, [7, 12, 15]),
+    PD9: (pd9, 9, [7, 12, 15]),
+    PD10: (pd10, 10, [7, 12, 15]),
+    PD11: (pd11, 11, [4, 7, 9, 12, 15]),
+    PD12: (pd12, 12, [2, 4, 7, 9, 12, 15]),
+    PD13: (pd13, 13, [2, 4, 9, 12, 15]),
+    PD14: (pd14, 14, [2, 4, 12, 15]),
+    PD15: (pd15, 15, [2, 4, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f412")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2, 12, 15]),
+    PE1: (pe1, 1, [12, 15]),
+    PE2: (pe2, 2, [0, 5, 6, 9, 12, 15]),
+    PE3: (pe3, 3, [0, 12, 15]),
+    PE4: (pe4, 4, [0, 5, 6, 8, 12, 15]),
+    PE5: (pe5, 5, [0, 3, 5, 6, 8, 12, 15]),
+    PE6: (pe6, 6, [0, 3, 5, 6, 12, 15]),
+    PE7: (pe7, 7, [1, 6, 10, 12, 15]),
+    PE8: (pe8, 8, [1, 6, 10, 12, 15]),
+    PE9: (pe9, 9, [1, 6, 10, 12, 15]),
+    PE10: (pe10, 10, [1, 10, 12, 15]),
+    PE11: (pe11, 11, [1, 5, 6, 12, 15]),
+    PE12: (pe12, 12, [1, 5, 6, 12, 15]),
+    PE13: (pe13, 13, [1, 5, 6, 12, 15]),
+    PE14: (pe14, 14, [1, 5, 6, 12, 15]),
+    PE15: (pe15, 15, [1, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f412")]
 gpio!(GPIOF, gpiof, PF, 'F', PFn, [
-    PF0: (pf0, 0, Input<Floating>),
-    PF1: (pf1, 1, Input<Floating>),
-    PF2: (pf2, 2, Input<Floating>),
-    PF3: (pf3, 3, Input<Floating>),
-    PF4: (pf4, 4, Input<Floating>),
-    PF5: (pf5, 5, Input<Floating>),
-    PF6: (pf6, 6, Input<Floating>),
-    PF7: (pf7, 7, Input<Floating>),
-    PF8: (pf8, 8, Input<Floating>),
-    PF9: (pf9, 9, Input<Floating>),
-    PF10: (pf10, 10, Input<Floating>),
-    PF11: (pf11, 11, Input<Floating>),
-    PF12: (pf12, 12, Input<Floating>),
-    PF13: (pf13, 13, Input<Floating>),
-    PF14: (pf14, 14, Input<Floating>),
-    PF15: (pf15, 15, Input<Floating>),
+    PF0: (pf0, 0, [4, 12, 15]),
+    PF1: (pf1, 1, [4, 12, 15]),
+    PF2: (pf2, 2, [4, 12, 15]),
+    PF3: (pf3, 3, [2, 12, 15]),
+    PF4: (pf4, 4, [2, 12, 15]),
+    PF5: (pf5, 5, [2, 12, 15]),
+    PF6: (pf6, 6, [0, 3, 9, 15]),
+    PF7: (pf7, 7, [0, 3, 9, 15]),
+    PF8: (pf8, 8, [9, 10, 15]),
+    PF9: (pf9, 9, [9, 10, 15]),
+    PF10: (pf10, 10, [1, 2, 15]),
+    PF11: (pf11, 11, [3, 15]),
+    PF12: (pf12, 12, [3, 12, 15]),
+    PF13: (pf13, 13, [4, 12, 15]),
+    PF14: (pf14, 14, [4, 12, 15]),
+    PF15: (pf15, 15, [4, 12, 15]),
 ]);
 
-#[cfg(feature = "gpiog")]
+#[cfg(feature = "gpio-f412")]
 gpio!(GPIOG, gpiog, PG, 'G', PGn, [
-    PG0: (pg0, 0, Input<Floating>),
-    PG1: (pg1, 1, Input<Floating>),
-    PG2: (pg2, 2, Input<Floating>),
-    PG3: (pg3, 3, Input<Floating>),
-    PG4: (pg4, 4, Input<Floating>),
-    PG5: (pg5, 5, Input<Floating>),
-    PG6: (pg6, 6, Input<Floating>),
-    PG7: (pg7, 7, Input<Floating>),
-    PG8: (pg8, 8, Input<Floating>),
-    PG9: (pg9, 9, Input<Floating>),
-    PG10: (pg10, 10, Input<Floating>),
-    PG11: (pg11, 11, Input<Floating>),
-    PG12: (pg12, 12, Input<Floating>),
-    PG13: (pg13, 13, Input<Floating>),
-    PG14: (pg14, 14, Input<Floating>),
-    PG15: (pg15, 15, Input<Floating>),
+    PG0: (pg0, 0, [9, 12, 15]),
+    PG1: (pg1, 1, [9, 12, 15]),
+    PG2: (pg2, 2, [12, 15]),
+    PG3: (pg3, 3, [12, 15]),
+    PG4: (pg4, 4, [12, 15]),
+    PG5: (pg5, 5, [12, 15]),
+    PG6: (pg6, 6, [10, 15]),
+    PG7: (pg7, 7, [8, 15]),
+    PG8: (pg8, 8, [8, 15]),
+    PG9: (pg9, 9, [8, 9, 12, 15]),
+    PG10: (pg10, 10, [12, 15]),
+    PG11: (pg11, 11, [9, 15]),
+    PG12: (pg12, 12, [8, 9, 12, 15]),
+    PG13: (pg13, 13, [0, 8, 12, 15]),
+    PG14: (pg14, 14, [0, 8, 9, 12, 15]),
+    PG15: (pg15, 15, [8, 15]),
 ]);
 
-#[cfg(not(feature = "stm32f401"))]
+#[cfg(feature = "gpio-f412")]
 gpio!(GPIOH, gpioh, PH, 'H', PHn, [
-    PH0: (ph0, 0, Input<Floating>),
-    PH1: (ph1, 1, Input<Floating>),
-    PH2: (ph2, 2, Input<Floating>),
-    PH3: (ph3, 3, Input<Floating>),
-    PH4: (ph4, 4, Input<Floating>),
-    PH5: (ph5, 5, Input<Floating>),
-    PH6: (ph6, 6, Input<Floating>),
-    PH7: (ph7, 7, Input<Floating>),
-    PH8: (ph8, 8, Input<Floating>),
-    PH9: (ph9, 9, Input<Floating>),
-    PH10: (ph10, 10, Input<Floating>),
-    PH11: (ph11, 11, Input<Floating>),
-    PH12: (ph12, 12, Input<Floating>),
-    PH13: (ph13, 13, Input<Floating>),
-    PH14: (ph14, 14, Input<Floating>),
-    PH15: (ph15, 15, Input<Floating>),
+    PH0: (ph0, 0, [15]),
+    PH1: (ph1, 1, [15]),
 ]);
 
-#[cfg(feature = "stm32f401")]
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [1, 2, 3, 7, 8, 15]),
+    PA1: (pa1, 1, [1, 2, 5, 7, 8, 9, 15]),
+    PA2: (pa2, 2, [1, 2, 3, 5, 7, 12, 15]),
+    PA3: (pa3, 3, [1, 2, 3, 5, 7, 10, 12, 15]),
+    PA4: (pa4, 4, [5, 6, 7, 8, 12, 15]),
+    PA5: (pa5, 5, [1, 3, 5, 8, 12, 15]),
+    PA6: (pa6, 6, [1, 2, 3, 5, 6, 7, 9, 10, 12, 15]),
+    PA7: (pa7, 7, [1, 2, 3, 5, 7, 9, 10, 15]),
+    PA8: (pa8, 8, [0, 1, 4, 6, 7, 8, 10, 11, 12, 15]),
+    PA9: (pa9, 9, [1, 3, 4, 5, 7, 10, 12, 15]),
+    PA10: (pa10, 10, [1, 3, 5, 6, 7, 10, 15]),
+    PA11: (pa11, 11, [1, 3, 5, 6, 7, 8, 9, 10, 11, 15]),
+    PA12: (pa12, 12, [1, 3, 5, 6, 7, 8, 9, 10, 11, 15]),
+    PA13: (pa13, 13, [0, 15], super::Debugger),
+    PA14: (pa14, 14, [0, 15], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 5, 6, 7, 8, 10, 11, 15], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 3, 6, 15]),
+    PB1: (pb1, 1, [1, 2, 3, 6, 8, 9, 15]),
+    PB2: (pb2, 2, [1, 6, 9, 15]),
+    PB3: (pb3, 3, [0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 15], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 5, 6, 8, 9, 10, 11, 12, 15], super::Debugger),
+    PB5: (pb5, 5, [1, 2, 4, 5, 6, 9, 10, 11, 12, 15]),
+    PB6: (pb6, 6, [1, 2, 4, 6, 7, 9, 10, 11, 12, 15]),
+    PB7: (pb7, 7, [1, 2, 4, 6, 7, 12, 15]),
+    PB8: (pb8, 8, [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 15]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 6, 8, 9, 11, 12, 15]),
+    PB10: (pb10, 10, [1, 4, 5, 6, 7, 9, 10, 12, 15]),
+    PB11: (pb11, 11, [1, 4, 5, 7, 15]),
+    PB12: (pb12, 12, [1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15]),
+    PB13: (pb13, 13, [1, 4, 5, 6, 8, 9, 10, 11, 15]),
+    PB14: (pb14, 14, [1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15]),
+    PB15: (pb15, 15, [0, 1, 3, 4, 5, 8, 9, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [1, 3, 7, 15]),
+    PC1: (pc1, 1, [1, 3, 7, 15]),
+    PC2: (pc2, 2, [1, 3, 5, 6, 7, 8, 12, 15]),
+    PC3: (pc3, 3, [1, 3, 5, 7, 12, 15]),
+    PC4: (pc4, 4, [3, 5, 10, 12, 15]),
+    PC5: (pc5, 5, [3, 4, 7, 10, 12, 15]),
+    PC6: (pc6, 6, [2, 3, 4, 5, 6, 7, 8, 10, 12, 15]),
+    PC7: (pc7, 7, [2, 3, 4, 5, 6, 7, 8, 10, 12, 15]),
+    PC8: (pc8, 8, [2, 3, 7, 8, 9, 12, 15]),
+    PC9: (pc9, 9, [0, 2, 3, 4, 5, 7, 9, 12, 15]),
+    PC10: (pc10, 10, [3, 6, 7, 9, 12, 15]),
+    PC11: (pc11, 11, [3, 5, 6, 7, 8, 9, 10, 12, 15]),
+    PC12: (pc12, 12, [6, 7, 8, 10, 12, 15]),
+    PC13: (pc13, 13, [15]),
+    PC14: (pc14, 14, [15]),
+    PC15: (pc15, 15, [15]),
+]);
+
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, [3, 9, 11, 12, 15]),
+    PD1: (pd1, 1, [3, 9, 11, 12, 15]),
+    PD2: (pd2, 2, [2, 3, 8, 10, 12, 15]),
+    PD3: (pd3, 3, [0, 5, 6, 7, 9, 12, 15]),
+    PD4: (pd4, 4, [6, 7, 12, 15]),
+    PD5: (pd5, 5, [3, 7, 12, 15]),
+    PD6: (pd6, 6, [5, 6, 7, 12, 15]),
+    PD7: (pd7, 7, [6, 7, 12, 15]),
+    PD8: (pd8, 8, [7, 12, 15]),
+    PD9: (pd9, 9, [7, 12, 15]),
+    PD10: (pd10, 10, [7, 8, 12, 15]),
+    PD11: (pd11, 11, [3, 4, 7, 9, 12, 15]),
+    PD12: (pd12, 12, [2, 3, 4, 7, 9, 12, 15]),
+    PD13: (pd13, 13, [2, 4, 9, 12, 15]),
+    PD14: (pd14, 14, [2, 4, 10, 11, 12, 15]),
+    PD15: (pd15, 15, [2, 4, 10, 11, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2, 3, 8, 12, 15]),
+    PE1: (pe1, 1, [3, 8, 12, 15]),
+    PE2: (pe2, 2, [0, 5, 6, 7, 9, 11, 12, 15]),
+    PE3: (pe3, 3, [0, 7, 11, 12, 15]),
+    PE4: (pe4, 4, [0, 5, 6, 7, 8, 12, 15]),
+    PE5: (pe5, 5, [0, 3, 5, 6, 7, 8, 12, 15]),
+    PE6: (pe6, 6, [0, 3, 5, 6, 7, 12, 15]),
+    PE7: (pe7, 7, [1, 6, 8, 10, 12, 15]),
+    PE8: (pe8, 8, [1, 6, 8, 10, 12, 15]),
+    PE9: (pe9, 9, [1, 6, 10, 12, 15]),
+    PE10: (pe10, 10, [1, 3, 10, 12, 15]),
+    PE11: (pe11, 11, [1, 3, 5, 6, 12, 15]),
+    PE12: (pe12, 12, [1, 3, 5, 6, 12, 15]),
+    PE13: (pe13, 13, [1, 3, 5, 6, 12, 15]),
+    PE14: (pe14, 14, [1, 5, 6, 10, 12, 15]),
+    PE15: (pe15, 15, [1, 10, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOF, gpiof, PF, 'F', PFn, [
+    PF0: (pf0, 0, [4, 12, 15]),
+    PF1: (pf1, 1, [4, 12, 15]),
+    PF2: (pf2, 2, [4, 12, 15]),
+    PF3: (pf3, 3, [2, 12, 15]),
+    PF4: (pf4, 4, [2, 12, 15]),
+    PF5: (pf5, 5, [2, 12, 15]),
+    PF6: (pf6, 6, [0, 3, 7, 8, 9, 15]),
+    PF7: (pf7, 7, [0, 3, 7, 8, 9, 15]),
+    PF8: (pf8, 8, [7, 8, 9, 10, 15]),
+    PF9: (pf9, 9, [7, 8, 9, 10, 15]),
+    PF10: (pf10, 10, [1, 2, 15]),
+    PF11: (pf11, 11, [3, 15]),
+    PF12: (pf12, 12, [3, 12, 15]),
+    PF13: (pf13, 13, [4, 12, 15]),
+    PF14: (pf14, 14, [4, 12, 15]),
+    PF15: (pf15, 15, [4, 12, 15]),
+]);
+
+#[cfg(feature = "gpio-f413")]
+gpio!(GPIOG, gpiog, PG, 'G', PGn, [
+    PG0: (pg0, 0, [9, 11, 12, 15]),
+    PG1: (pg1, 1, [9, 11, 12, 15]),
+    PG2: (pg2, 2, [12, 15]),
+    PG3: (pg3, 3, [12, 15]),
+    PG4: (pg4, 4, [12, 15]),
+    PG5: (pg5, 5, [12, 15]),
+    PG6: (pg6, 6, [10, 15]),
+    PG7: (pg7, 7, [8, 15]),
+    PG8: (pg8, 8, [8, 15]),
+    PG9: (pg9, 9, [8, 9, 12, 15]),
+    PG10: (pg10, 10, [12, 15]),
+    PG11: (pg11, 11, [9, 11, 15]),
+    PG12: (pg12, 12, [8, 9, 11, 12, 15]),
+    PG13: (pg13, 13, [0, 8, 12, 15]),
+    PG14: (pg14, 14, [0, 8, 9, 12, 15]),
+    PG15: (pg15, 15, [8, 15]),
+]);
+
+#[cfg(feature = "gpio-f413")]
 gpio!(GPIOH, gpioh, PH, 'H', PHn, [
-    PH0: (ph0, 0, Input<Floating>),
-    PH1: (ph1, 1, Input<Floating>),
+    PH0: (ph0, 0, [15]),
+    PH1: (ph1, 1, [15]),
 ]);
 
-#[cfg(feature = "gpioi")]
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [0, 1, 2, 3, 7, 8, 11]),
+    PA1: (pa1, 1, [1, 2, 7, 8, 11]),
+    PA2: (pa2, 2, [1, 2, 3, 7, 11]),
+    PA3: (pa3, 3, [1, 2, 3, 7, 10, 11]),
+    PA4: (pa4, 4, [5, 6, 7, 12, 13]),
+    PA5: (pa5, 5, [1, 3, 5, 10]),
+    PA6: (pa6, 6, [1, 2, 3, 5, 9, 13]),
+    PA7: (pa7, 7, [1, 2, 3, 5, 9, 11]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10]),
+    PA9: (pa9, 9, [1, 4, 7, 13]),
+    PA10: (pa10, 10, [1, 7, 10, 13]),
+    PA11: (pa11, 11, [1, 7, 9, 10]),
+    PA12: (pa12, 12, [1, 7, 9, 10]),
+    PA13: (pa13, 13, [0], super::Debugger),
+    PA14: (pa14, 14, [0], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 5, 6], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 3, 10, 11]),
+    PB1: (pb1, 1, [1, 2, 3, 10, 11]),
+    PB2: (pb2, 2, []),
+    PB3: (pb3, 3, [0, 1, 5, 6], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 5, 6, 7], super::Debugger),
+    PB5: (pb5, 5, [2, 4, 5, 6, 9, 10, 11, 13]),
+    PB6: (pb6, 6, [2, 4, 7, 9, 13]),
+    PB7: (pb7, 7, [2, 4, 7, 12, 13]),
+    PB8: (pb8, 8, [2, 3, 4, 9, 11, 12, 13]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 9, 12, 13]),
+    PB10: (pb10, 10, [1, 4, 5, 7, 10, 11]),
+    PB11: (pb11, 11, [1, 4, 7, 10, 11]),
+    PB12: (pb12, 12, [1, 4, 5, 7, 9, 10, 11, 12]),
+    PB13: (pb13, 13, [1, 5, 7, 9, 10, 11]),
+    PB14: (pb14, 14, [1, 3, 5, 6, 7, 9, 12]),
+    PB15: (pb15, 15, [0, 1, 3, 5, 9, 12]),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [10]),
+    PC1: (pc1, 1, [11]),
+    PC2: (pc2, 2, [5, 6, 10, 11]),
+    PC3: (pc3, 3, [5, 10, 11]),
+    PC4: (pc4, 4, [11]),
+    PC5: (pc5, 5, [11]),
+    PC6: (pc6, 6, [2, 3, 5, 8, 12, 13]),
+    PC7: (pc7, 7, [2, 3, 6, 8, 12, 13]),
+    PC8: (pc8, 8, [2, 3, 8, 12, 13]),
+    PC9: (pc9, 9, [0, 2, 3, 4, 5, 12, 13]),
+    PC10: (pc10, 10, [6, 7, 8, 12, 13]),
+    PC11: (pc11, 11, [5, 6, 7, 8, 12, 13]),
+    PC12: (pc12, 12, [6, 7, 8, 12, 13]),
+    PC13: (pc13, 13, [0]),
+    PC14: (pc14, 14, [0]),
+    PC15: (pc15, 15, [0]),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, [9, 12]),
+    PD1: (pd1, 1, [9, 12]),
+    PD2: (pd2, 2, [2, 8, 12, 13]),
+    PD3: (pd3, 3, [7, 12]),
+    PD4: (pd4, 4, [7, 12]),
+    PD5: (pd5, 5, [7, 12]),
+    PD6: (pd6, 6, [7, 12]),
+    PD7: (pd7, 7, [7, 12]),
+    PD8: (pd8, 8, [7, 12]),
+    PD9: (pd9, 9, [7, 12]),
+    PD10: (pd10, 10, [7, 12]),
+    PD11: (pd11, 11, [7, 12]),
+    PD12: (pd12, 12, [2, 7, 12]),
+    PD13: (pd13, 13, [2, 12]),
+    PD14: (pd14, 14, [2, 12]),
+    PD15: (pd15, 15, [2, 12]),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2, 12, 13]),
+    PE1: (pe1, 1, [12, 13]),
+    PE2: (pe2, 2, [0, 11, 12]),
+    PE3: (pe3, 3, [0, 12]),
+    PE4: (pe4, 4, [0, 12, 13]),
+    PE5: (pe5, 5, [0, 3, 12, 13]),
+    PE6: (pe6, 6, [0, 3, 12, 13]),
+    PE7: (pe7, 7, [1, 12]),
+    PE8: (pe8, 8, [1, 12]),
+    PE9: (pe9, 9, [1, 12]),
+    PE10: (pe10, 10, [1, 12]),
+    PE11: (pe11, 11, [1, 12]),
+    PE12: (pe12, 12, [1, 12]),
+    PE13: (pe13, 13, [1, 12]),
+    PE14: (pe14, 14, [1, 12]),
+    PE15: (pe15, 15, [1, 12]),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOF, gpiof, PF, 'F', PFn, [
+    PF0: (pf0, 0, [4, 12]),
+    PF1: (pf1, 1, [4, 12]),
+    PF2: (pf2, 2, [4, 12]),
+    PF3: (pf3, 3, [12]),
+    PF4: (pf4, 4, [12]),
+    PF5: (pf5, 5, [12]),
+    PF6: (pf6, 6, [3, 12]),
+    PF7: (pf7, 7, [3, 12]),
+    PF8: (pf8, 8, [9, 12]),
+    PF9: (pf9, 9, [9, 12]),
+    PF10: (pf10, 10, [12]),
+    PF11: (pf11, 11, [13]),
+    PF12: (pf12, 12, [12]),
+    PF13: (pf13, 13, [12]),
+    PF14: (pf14, 14, [12]),
+    PF15: (pf15, 15, [12]),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOG, gpiog, PG, 'G', PGn, [
+    PG0: (pg0, 0, [12]),
+    PG1: (pg1, 1, [12]),
+    PG2: (pg2, 2, [12]),
+    PG3: (pg3, 3, [12]),
+    PG4: (pg4, 4, [12]),
+    PG5: (pg5, 5, [12]),
+    PG6: (pg6, 6, [12]),
+    PG7: (pg7, 7, [8, 12]),
+    PG8: (pg8, 8, [8, 11]),
+    PG9: (pg9, 9, [8, 12]),
+    PG10: (pg10, 10, [12]),
+    PG11: (pg11, 11, [11, 12]),
+    PG12: (pg12, 12, [8, 12]),
+    PG13: (pg13, 13, [8, 11, 12]),
+    PG14: (pg14, 14, [8, 11, 12]),
+    PG15: (pg15, 15, [8, 13]),
+]);
+
+#[cfg(feature = "gpio-f417")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, [0]),
+    PH1: (ph1, 1, [0]),
+    PH2: (ph2, 2, [11]),
+    PH3: (ph3, 3, [11]),
+    PH4: (ph4, 4, [4, 10]),
+    PH5: (ph5, 5, [4]),
+    PH6: (ph6, 6, [4, 9, 11]),
+    PH7: (ph7, 7, [4, 11]),
+    PH8: (ph8, 8, [4, 13]),
+    PH9: (ph9, 9, [4, 9, 13]),
+    PH10: (ph10, 10, [2, 13]),
+    PH11: (ph11, 11, [2, 13]),
+    PH12: (ph12, 12, [2, 13]),
+    PH13: (ph13, 13, [3, 9]),
+    PH14: (ph14, 14, [3, 13]),
+    PH15: (ph15, 15, [3, 13]),
+]);
+
+#[cfg(feature = "gpio-f417")]
 gpio!(GPIOI, gpioi, PI, 'I', PIn, [
-    PI0: (pi0, 0, Input<Floating>),
-    PI1: (pi1, 1, Input<Floating>),
-    PI2: (pi2, 2, Input<Floating>),
-    PI3: (pi3, 3, Input<Floating>),
-    PI4: (pi4, 4, Input<Floating>),
-    PI5: (pi5, 5, Input<Floating>),
-    PI6: (pi6, 6, Input<Floating>),
-    PI7: (pi7, 7, Input<Floating>),
-    PI8: (pi8, 8, Input<Floating>),
-    PI9: (pi9, 9, Input<Floating>),
-    PI10: (pi10, 10, Input<Floating>),
-    PI11: (pi11, 11, Input<Floating>),
-    PI12: (pi12, 12, Input<Floating>),
-    PI13: (pi13, 13, Input<Floating>),
-    PI14: (pi14, 14, Input<Floating>),
-    PI15: (pi15, 15, Input<Floating>),
+    PI0: (pi0, 0, [2, 5, 13]),
+    PI1: (pi1, 1, [5, 13]),
+    PI2: (pi2, 2, [3, 5, 6, 13]),
+    PI3: (pi3, 3, [3, 5, 13]),
+    PI4: (pi4, 4, [3, 13]),
+    PI5: (pi5, 5, [3, 13]),
+    PI6: (pi6, 6, [3, 13]),
+    PI7: (pi7, 7, [3, 13]),
+    PI8: (pi8, 8, []),
+    PI9: (pi9, 9, [9]),
+    PI10: (pi10, 10, [11]),
+    PI11: (pi11, 11, [10]),
 ]);
 
-#[cfg(feature = "gpioj")]
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [1, 2, 3, 7, 8, 11]),
+    PA1: (pa1, 1, [1, 2, 7, 8, 11]),
+    PA2: (pa2, 2, [1, 2, 3, 7, 11]),
+    PA3: (pa3, 3, [1, 2, 3, 7, 10, 11, 14]),
+    PA4: (pa4, 4, [5, 6, 7, 12, 13, 14]),
+    PA5: (pa5, 5, [1, 3, 5, 10]),
+    PA6: (pa6, 6, [1, 2, 3, 5, 9, 13, 14]),
+    PA7: (pa7, 7, [1, 2, 3, 5, 9, 11]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10, 14]),
+    PA9: (pa9, 9, [1, 4, 7, 13]),
+    PA10: (pa10, 10, [1, 7, 10, 13]),
+    PA11: (pa11, 11, [1, 7, 9, 10, 14]),
+    PA12: (pa12, 12, [1, 7, 9, 10, 14]),
+    PA13: (pa13, 13, [0], super::Debugger),
+    PA14: (pa14, 14, [0], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 5, 6], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 3, 9, 10, 11]),
+    PB1: (pb1, 1, [1, 2, 3, 9, 10, 11]),
+    PB2: (pb2, 2, []),
+    PB3: (pb3, 3, [0, 1, 5, 6], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 5, 6, 7], super::Debugger),
+    PB5: (pb5, 5, [2, 4, 5, 6, 9, 10, 11, 12, 13]),
+    PB6: (pb6, 6, [2, 4, 7, 9, 12, 13]),
+    PB7: (pb7, 7, [2, 4, 7, 12, 13]),
+    PB8: (pb8, 8, [2, 3, 4, 9, 11, 12, 13, 14]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 9, 12, 13, 14]),
+    PB10: (pb10, 10, [1, 4, 5, 7, 10, 11, 14]),
+    PB11: (pb11, 11, [1, 4, 7, 10, 11, 14]),
+    PB12: (pb12, 12, [1, 4, 5, 7, 9, 10, 11, 12]),
+    PB13: (pb13, 13, [1, 5, 7, 9, 10, 11]),
+    PB14: (pb14, 14, [1, 3, 5, 6, 7, 9, 12]),
+    PB15: (pb15, 15, [0, 1, 3, 5, 9, 12]),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [10, 12]),
+    PC1: (pc1, 1, [11]),
+    PC2: (pc2, 2, [5, 6, 10, 11, 12]),
+    PC3: (pc3, 3, [5, 10, 11, 12]),
+    PC4: (pc4, 4, [11]),
+    PC5: (pc5, 5, [11]),
+    PC6: (pc6, 6, [2, 3, 5, 8, 12, 13, 14]),
+    PC7: (pc7, 7, [2, 3, 6, 8, 12, 13, 14]),
+    PC8: (pc8, 8, [2, 3, 8, 12, 13]),
+    PC9: (pc9, 9, [0, 2, 3, 4, 5, 12, 13]),
+    PC10: (pc10, 10, [6, 7, 8, 12, 13, 14]),
+    PC11: (pc11, 11, [5, 6, 7, 8, 12, 13]),
+    PC12: (pc12, 12, [6, 7, 8, 12, 13]),
+    PC13: (pc13, 13, []),
+    PC14: (pc14, 14, []),
+    PC15: (pc15, 15, []),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, [9, 12]),
+    PD1: (pd1, 1, [9, 12]),
+    PD2: (pd2, 2, [2, 8, 12, 13]),
+    PD3: (pd3, 3, [5, 7, 12, 13, 14]),
+    PD4: (pd4, 4, [7, 12]),
+    PD5: (pd5, 5, [7, 12]),
+    PD6: (pd6, 6, [5, 6, 7, 12, 13, 14]),
+    PD7: (pd7, 7, [7, 12]),
+    PD8: (pd8, 8, [7, 12]),
+    PD9: (pd9, 9, [7, 12]),
+    PD10: (pd10, 10, [7, 12, 14]),
+    PD11: (pd11, 11, [7, 12]),
+    PD12: (pd12, 12, [2, 7, 12]),
+    PD13: (pd13, 13, [2, 12]),
+    PD14: (pd14, 14, [2, 12]),
+    PD15: (pd15, 15, [2, 12]),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2, 8, 12, 13]),
+    PE1: (pe1, 1, [8, 12, 13]),
+    PE2: (pe2, 2, [0, 5, 6, 11, 12]),
+    PE3: (pe3, 3, [0, 6, 12]),
+    PE4: (pe4, 4, [0, 5, 6, 12, 13, 14]),
+    PE5: (pe5, 5, [0, 3, 5, 6, 12, 13, 14]),
+    PE6: (pe6, 6, [0, 3, 5, 6, 12, 13, 14]),
+    PE7: (pe7, 7, [1, 8, 12]),
+    PE8: (pe8, 8, [1, 8, 12]),
+    PE9: (pe9, 9, [1, 12]),
+    PE10: (pe10, 10, [1, 12]),
+    PE11: (pe11, 11, [1, 5, 12, 14]),
+    PE12: (pe12, 12, [1, 5, 12, 14]),
+    PE13: (pe13, 13, [1, 5, 12, 14]),
+    PE14: (pe14, 14, [1, 5, 12, 14]),
+    PE15: (pe15, 15, [1, 12, 14]),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOF, gpiof, PF, 'F', PFn, [
+    PF0: (pf0, 0, [4, 12]),
+    PF1: (pf1, 1, [4, 12]),
+    PF2: (pf2, 2, [4, 12]),
+    PF3: (pf3, 3, [12]),
+    PF4: (pf4, 4, [12]),
+    PF5: (pf5, 5, [12]),
+    PF6: (pf6, 6, [3, 5, 6, 8, 12]),
+    PF7: (pf7, 7, [3, 5, 6, 8, 12]),
+    PF8: (pf8, 8, [5, 6, 9, 12]),
+    PF9: (pf9, 9, [5, 6, 9, 12]),
+    PF10: (pf10, 10, [12, 13, 14]),
+    PF11: (pf11, 11, [5, 12, 13]),
+    PF12: (pf12, 12, [12]),
+    PF13: (pf13, 13, [12]),
+    PF14: (pf14, 14, [12]),
+    PF15: (pf15, 15, [12]),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOG, gpiog, PG, 'G', PGn, [
+    PG0: (pg0, 0, [12]),
+    PG1: (pg1, 1, [12]),
+    PG2: (pg2, 2, [12]),
+    PG3: (pg3, 3, [12]),
+    PG4: (pg4, 4, [12]),
+    PG5: (pg5, 5, [12]),
+    PG6: (pg6, 6, [12, 13, 14]),
+    PG7: (pg7, 7, [8, 12, 13, 14]),
+    PG8: (pg8, 8, [5, 8, 11, 12]),
+    PG9: (pg9, 9, [8, 12, 13]),
+    PG10: (pg10, 10, [9, 12, 13, 14]),
+    PG11: (pg11, 11, [11, 12, 13, 14]),
+    PG12: (pg12, 12, [5, 8, 9, 12, 14]),
+    PG13: (pg13, 13, [5, 8, 11, 12]),
+    PG14: (pg14, 14, [5, 8, 11, 12]),
+    PG15: (pg15, 15, [8, 12, 13]),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, []),
+    PH1: (ph1, 1, []),
+    PH2: (ph2, 2, [11, 12, 14]),
+    PH3: (ph3, 3, [11, 12, 14]),
+    PH4: (ph4, 4, [4, 10]),
+    PH5: (ph5, 5, [4, 5, 12]),
+    PH6: (ph6, 6, [4, 5, 9, 11, 12, 13]),
+    PH7: (ph7, 7, [4, 5, 11, 12, 13]),
+    PH8: (ph8, 8, [4, 12, 13, 14]),
+    PH9: (ph9, 9, [4, 9, 12, 13, 14]),
+    PH10: (ph10, 10, [2, 12, 13, 14]),
+    PH11: (ph11, 11, [2, 12, 13, 14]),
+    PH12: (ph12, 12, [2, 12, 13, 14]),
+    PH13: (ph13, 13, [3, 9, 12, 14]),
+    PH14: (ph14, 14, [3, 12, 13, 14]),
+    PH15: (ph15, 15, [3, 12, 13, 14]),
+]);
+
+#[cfg(feature = "gpio-f427")]
+gpio!(GPIOI, gpioi, PI, 'I', PIn, [
+    PI0: (pi0, 0, [2, 5, 12, 13, 14]),
+    PI1: (pi1, 1, [5, 12, 13, 14]),
+    PI2: (pi2, 2, [3, 5, 6, 12, 13, 14]),
+    PI3: (pi3, 3, [3, 5, 12, 13]),
+    PI4: (pi4, 4, [3, 12, 13, 14]),
+    PI5: (pi5, 5, [3, 12, 13, 14]),
+    PI6: (pi6, 6, [3, 12, 13, 14]),
+    PI7: (pi7, 7, [3, 12, 13, 14]),
+    PI8: (pi8, 8, []),
+    PI9: (pi9, 9, [9, 12, 14]),
+    PI10: (pi10, 10, [11, 12, 14]),
+    PI11: (pi11, 11, [10]),
+    PI12: (pi12, 12, [14]),
+    PI13: (pi13, 13, [14]),
+    PI14: (pi14, 14, [14]),
+    PI15: (pi15, 15, [14]),
+]);
+
+#[cfg(feature = "gpio-f427")]
 gpio!(GPIOJ, gpioj, PJ, 'J', PJn, [
-    PJ0: (pj0, 0, Input<Floating>),
-    PJ1: (pj1, 1, Input<Floating>),
-    PJ2: (pj2, 2, Input<Floating>),
-    PJ3: (pj3, 3, Input<Floating>),
-    PJ4: (pj4, 4, Input<Floating>),
-    PJ5: (pj5, 5, Input<Floating>),
-    PJ6: (pj6, 6, Input<Floating>),
-    PJ7: (pj7, 7, Input<Floating>),
-    PJ8: (pj8, 8, Input<Floating>),
-    PJ9: (pj9, 9, Input<Floating>),
-    PJ10: (pj10, 10, Input<Floating>),
-    PJ11: (pj11, 11, Input<Floating>),
-    PJ12: (pj12, 12, Input<Floating>),
-    PJ13: (pj13, 13, Input<Floating>),
-    PJ14: (pj14, 14, Input<Floating>),
-    PJ15: (pj15, 15, Input<Floating>),
+    PJ0: (pj0, 0, [14]),
+    PJ1: (pj1, 1, [14]),
+    PJ2: (pj2, 2, [14]),
+    PJ3: (pj3, 3, [14]),
+    PJ4: (pj4, 4, [14]),
+    PJ5: (pj5, 5, [14]),
+    PJ6: (pj6, 6, [14]),
+    PJ7: (pj7, 7, [14]),
+    PJ8: (pj8, 8, [14]),
+    PJ9: (pj9, 9, [14]),
+    PJ10: (pj10, 10, [14]),
+    PJ11: (pj11, 11, [14]),
+    PJ12: (pj12, 12, [14]),
+    PJ13: (pj13, 13, [14]),
+    PJ14: (pj14, 14, [14]),
+    PJ15: (pj15, 15, [14]),
 ]);
 
-#[cfg(feature = "gpiok")]
+#[cfg(feature = "gpio-f427")]
 gpio!(GPIOK, gpiok, PK, 'K', PKn, [
-    PK0: (pk0, 0, Input<Floating>),
-    PK1: (pk1, 1, Input<Floating>),
-    PK2: (pk2, 2, Input<Floating>),
-    PK3: (pk3, 3, Input<Floating>),
-    PK4: (pk4, 4, Input<Floating>),
-    PK5: (pk5, 5, Input<Floating>),
-    PK6: (pk6, 6, Input<Floating>),
-    PK7: (pk7, 7, Input<Floating>),
+    PK0: (pk0, 0, [14]),
+    PK1: (pk1, 1, [14]),
+    PK2: (pk2, 2, [14]),
+    PK3: (pk3, 3, [14]),
+    PK4: (pk4, 4, [14]),
+    PK5: (pk5, 5, [14]),
+    PK6: (pk6, 6, [14]),
+    PK7: (pk7, 7, [14]),
 ]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [1, 2, 3, 7, 8]),
+    PA1: (pa1, 1, [1, 2, 7, 8, 9, 10]),
+    PA2: (pa2, 2, [1, 2, 3, 7, 8]),
+    PA3: (pa3, 3, [1, 2, 3, 6, 7, 10]),
+    PA4: (pa4, 4, [5, 6, 7, 12, 13]),
+    PA5: (pa5, 5, [1, 3, 5, 10]),
+    PA6: (pa6, 6, [1, 2, 3, 5, 6, 9, 13]),
+    PA7: (pa7, 7, [1, 2, 3, 5, 9, 12]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10]),
+    PA9: (pa9, 9, [1, 4, 5, 6, 7, 13]),
+    PA10: (pa10, 10, [1, 7, 10, 13]),
+    PA11: (pa11, 11, [1, 7, 9, 10]),
+    PA12: (pa12, 12, [1, 7, 8, 9, 10]),
+    PA13: (pa13, 13, [0], super::Debugger),
+    PA14: (pa14, 14, [0], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 4, 5, 6, 8], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 3, 7, 8, 10, 12]),
+    PB1: (pb1, 1, [1, 2, 3, 10, 12]),
+    PB2: (pb2, 2, [1, 6, 7, 9, 10, 12]),
+    PB3: (pb3, 3, [0, 1, 4, 5, 6], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 4, 5, 6, 7], super::Debugger),
+    PB5: (pb5, 5, [2, 4, 5, 6, 9, 10, 12, 13]),
+    PB6: (pb6, 6, [2, 3, 4, 7, 9, 10, 12, 13]),
+    PB7: (pb7, 7, [2, 4, 7, 8, 12, 13]),
+    PB8: (pb8, 8, [1, 2, 3, 4, 9, 12, 13]),
+    PB9: (pb9, 9, [1, 2, 3, 4, 5, 6, 9, 12, 13]),
+    PB10: (pb10, 10, [1, 4, 5, 6, 7, 10]),
+    PB11: (pb11, 11, [1, 4, 7, 8, 10]),
+    PB12: (pb12, 12, [1, 4, 5, 6, 7, 9, 10, 12]),
+    PB13: (pb13, 13, [1, 5, 7, 9, 10]),
+    PB14: (pb14, 14, [1, 3, 5, 7, 9, 12]),
+    PB15: (pb15, 15, [0, 1, 3, 5, 9, 12]),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [6, 10, 12]),
+    PC1: (pc1, 1, [5, 6, 7]),
+    PC2: (pc2, 2, [5, 10, 12]),
+    PC3: (pc3, 3, [5, 10, 12]),
+    PC4: (pc4, 4, [5, 8, 12]),
+    PC5: (pc5, 5, [7, 8, 12]),
+    PC6: (pc6, 6, [2, 3, 4, 5, 8, 12, 13]),
+    PC7: (pc7, 7, [2, 3, 4, 5, 6, 7, 8, 12, 13]),
+    PC8: (pc8, 8, [0, 2, 3, 7, 8, 12, 13]),
+    PC9: (pc9, 9, [0, 2, 3, 4, 5, 7, 9, 12, 13]),
+    PC10: (pc10, 10, [6, 7, 8, 9, 12, 13]),
+    PC11: (pc11, 11, [6, 7, 8, 9, 12, 13]),
+    PC12: (pc12, 12, [4, 6, 7, 8, 12, 13]),
+    PC13: (pc13, 13, []),
+    PC14: (pc14, 14, []),
+    PC15: (pc15, 15, []),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, [5, 6, 9, 12]),
+    PD1: (pd1, 1, [7, 9, 12]),
+    PD2: (pd2, 2, [2, 8, 12, 13]),
+    PD3: (pd3, 3, [0, 5, 7, 9, 12, 13]),
+    PD4: (pd4, 4, [7, 12]),
+    PD5: (pd5, 5, [7, 12]),
+    PD6: (pd6, 6, [5, 6, 7, 12, 13]),
+    PD7: (pd7, 7, [7, 8, 12]),
+    PD8: (pd8, 8, [7, 8, 12]),
+    PD9: (pd9, 9, [7, 12]),
+    PD10: (pd10, 10, [7, 12]),
+    PD11: (pd11, 11, [4, 7, 9, 10, 12]),
+    PD12: (pd12, 12, [2, 4, 7, 9, 10, 12]),
+    PD13: (pd13, 13, [2, 4, 9, 10, 12]),
+    PD14: (pd14, 14, [2, 4, 8, 12]),
+    PD15: (pd15, 15, [2, 4, 12]),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2, 10, 12, 13]),
+    PE1: (pe1, 1, [12, 13]),
+    PE2: (pe2, 2, [0, 5, 6, 9, 12]),
+    PE3: (pe3, 3, [0, 6, 12]),
+    PE4: (pe4, 4, [0, 5, 6, 12, 13]),
+    PE5: (pe5, 5, [0, 3, 5, 6, 12, 13]),
+    PE6: (pe6, 6, [0, 3, 5, 6, 12, 13]),
+    PE7: (pe7, 7, [1, 8, 10, 12]),
+    PE8: (pe8, 8, [1, 8, 10, 12]),
+    PE9: (pe9, 9, [1, 10, 12]),
+    PE10: (pe10, 10, [1, 10, 12]),
+    PE11: (pe11, 11, [1, 5, 10, 12]),
+    PE12: (pe12, 12, [1, 5, 10, 12]),
+    PE13: (pe13, 13, [1, 5, 10, 12]),
+    PE14: (pe14, 14, [1, 5, 10, 12]),
+    PE15: (pe15, 15, [1, 12]),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOF, gpiof, PF, 'F', PFn, [
+    PF0: (pf0, 0, [4, 12]),
+    PF1: (pf1, 1, [4, 12]),
+    PF2: (pf2, 2, [4, 12]),
+    PF3: (pf3, 3, [12]),
+    PF4: (pf4, 4, [12]),
+    PF5: (pf5, 5, [12]),
+    PF6: (pf6, 6, [3, 6, 9]),
+    PF7: (pf7, 7, [3, 6, 9]),
+    PF8: (pf8, 8, [6, 9, 10]),
+    PF9: (pf9, 9, [6, 9, 10]),
+    PF10: (pf10, 10, [13]),
+    PF11: (pf11, 11, [10, 12, 13]),
+    PF12: (pf12, 12, [12]),
+    PF13: (pf13, 13, [4, 12]),
+    PF14: (pf14, 14, [4, 12]),
+    PF15: (pf15, 15, [4, 12]),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOG, gpiog, PG, 'G', PGn, [
+    PG0: (pg0, 0, [12]),
+    PG1: (pg1, 1, [12]),
+    PG2: (pg2, 2, [12]),
+    PG3: (pg3, 3, [12]),
+    PG4: (pg4, 4, [12]),
+    PG5: (pg5, 5, [12]),
+    PG6: (pg6, 6, [10, 13]),
+    PG7: (pg7, 7, [8, 12, 13]),
+    PG8: (pg8, 8, [7, 8, 12]),
+    PG9: (pg9, 9, [7, 8, 9, 10, 12, 13]),
+    PG10: (pg10, 10, [10, 12, 13]),
+    PG11: (pg11, 11, [6, 7, 13]),
+    PG12: (pg12, 12, [6, 7, 8, 12]),
+    PG13: (pg13, 13, [0, 6, 8, 12]),
+    PG14: (pg14, 14, [0, 6, 8, 9, 12]),
+    PG15: (pg15, 15, [8, 12, 13]),
+]);
+
+#[cfg(feature = "gpio-f446")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, []),
+    PH1: (ph1, 1, []),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOA, gpioa, PA, 'A', PAn, [
+    PA0: (pa0, 0, [1, 2, 3, 7, 8, 11]),
+    PA1: (pa1, 1, [1, 2, 7, 8, 9, 11, 14]),
+    PA2: (pa2, 2, [1, 2, 3, 7, 11, 14]),
+    PA3: (pa3, 3, [1, 2, 3, 7, 9, 10, 11, 14]),
+    PA4: (pa4, 4, [5, 6, 7, 12, 13, 14]),
+    PA5: (pa5, 5, [1, 3, 5, 10, 14]),
+    PA6: (pa6, 6, [1, 2, 3, 5, 9, 13, 14]),
+    PA7: (pa7, 7, [1, 2, 3, 5, 9, 10, 11, 12]),
+    PA8: (pa8, 8, [0, 1, 4, 7, 10, 14]),
+    PA9: (pa9, 9, [1, 4, 5, 7, 13]),
+    PA10: (pa10, 10, [1, 7, 10, 13]),
+    PA11: (pa11, 11, [1, 7, 9, 10, 14]),
+    PA12: (pa12, 12, [1, 7, 9, 10, 14]),
+    PA13: (pa13, 13, [0], super::Debugger),
+    PA14: (pa14, 14, [0], super::Debugger),
+    PA15: (pa15, 15, [0, 1, 5, 6], super::Debugger),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOB, gpiob, PB, 'B', PBn, [
+    PB0: (pb0, 0, [1, 2, 3, 9, 10, 11, 14]),
+    PB1: (pb1, 1, [1, 2, 3, 9, 10, 11, 14]),
+    PB2: (pb2, 2, []),
+    PB3: (pb3, 3, [0, 1, 5, 6], super::Debugger),
+    PB4: (pb4, 4, [0, 2, 5, 6, 7], super::Debugger),
+    PB5: (pb5, 5, [2, 4, 5, 6, 9, 10, 11, 12, 13, 14]),
+    PB6: (pb6, 6, [2, 4, 7, 9, 10, 12, 13]),
+    PB7: (pb7, 7, [2, 4, 7, 12, 13]),
+    PB8: (pb8, 8, [2, 3, 4, 9, 11, 12, 13, 14]),
+    PB9: (pb9, 9, [2, 3, 4, 5, 9, 12, 13, 14]),
+    PB10: (pb10, 10, [1, 4, 5, 7, 9, 10, 11, 14]),
+    PB11: (pb11, 11, [1, 4, 7, 10, 11, 13, 14]),
+    PB12: (pb12, 12, [1, 4, 5, 7, 9, 10, 11, 12]),
+    PB13: (pb13, 13, [1, 5, 7, 9, 10, 11]),
+    PB14: (pb14, 14, [1, 3, 5, 6, 7, 9, 12]),
+    PB15: (pb15, 15, [0, 1, 3, 5, 9, 12]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOC, gpioc, PC, 'C', PCn, [
+    PC0: (pc0, 0, [10, 12, 14]),
+    PC1: (pc1, 1, [0, 5, 6, 11]),
+    PC2: (pc2, 2, [5, 6, 10, 11, 12]),
+    PC3: (pc3, 3, [5, 10, 11, 12]),
+    PC4: (pc4, 4, [11, 12]),
+    PC5: (pc5, 5, [11, 12]),
+    PC6: (pc6, 6, [2, 3, 5, 8, 12, 13, 14]),
+    PC7: (pc7, 7, [2, 3, 6, 8, 12, 13, 14]),
+    PC8: (pc8, 8, [0, 2, 3, 8, 12, 13]),
+    PC9: (pc9, 9, [0, 2, 3, 4, 5, 9, 12, 13]),
+    PC10: (pc10, 10, [6, 7, 8, 9, 12, 13, 14]),
+    PC11: (pc11, 11, [5, 6, 7, 8, 9, 12, 13]),
+    PC12: (pc12, 12, [0, 6, 7, 8, 12, 13]),
+    PC13: (pc13, 13, []),
+    PC14: (pc14, 14, []),
+    PC15: (pc15, 15, []),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOD, gpiod, PD, 'D', PDn, [
+    PD0: (pd0, 0, [9, 12]),
+    PD1: (pd1, 1, [9, 12]),
+    PD2: (pd2, 2, [0, 2, 8, 12, 13]),
+    PD3: (pd3, 3, [5, 7, 12, 13, 14]),
+    PD4: (pd4, 4, [7, 12]),
+    PD5: (pd5, 5, [7, 12]),
+    PD6: (pd6, 6, [5, 6, 7, 12, 13, 14]),
+    PD7: (pd7, 7, [7, 12]),
+    PD8: (pd8, 8, [7, 12]),
+    PD9: (pd9, 9, [7, 12]),
+    PD10: (pd10, 10, [7, 12, 14]),
+    PD11: (pd11, 11, [7, 9, 12]),
+    PD12: (pd12, 12, [2, 7, 9, 12]),
+    PD13: (pd13, 13, [2, 9, 12]),
+    PD14: (pd14, 14, [2, 12]),
+    PD15: (pd15, 15, [2, 12]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOE, gpioe, PE, 'E', PEn, [
+    PE0: (pe0, 0, [2, 8, 12, 13]),
+    PE1: (pe1, 1, [8, 12, 13]),
+    PE2: (pe2, 2, [0, 5, 6, 9, 11, 12]),
+    PE3: (pe3, 3, [0, 6, 12]),
+    PE4: (pe4, 4, [0, 5, 6, 12, 13, 14]),
+    PE5: (pe5, 5, [0, 3, 5, 6, 12, 13, 14]),
+    PE6: (pe6, 6, [0, 3, 5, 6, 12, 13, 14]),
+    PE7: (pe7, 7, [1, 8, 10, 12]),
+    PE8: (pe8, 8, [1, 8, 10, 12]),
+    PE9: (pe9, 9, [1, 10, 12]),
+    PE10: (pe10, 10, [1, 10, 12]),
+    PE11: (pe11, 11, [1, 5, 12, 14]),
+    PE12: (pe12, 12, [1, 5, 12, 14]),
+    PE13: (pe13, 13, [1, 5, 12, 14]),
+    PE14: (pe14, 14, [1, 5, 12, 14]),
+    PE15: (pe15, 15, [1, 12, 14]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOF, gpiof, PF, 'F', PFn, [
+    PF0: (pf0, 0, [4, 12]),
+    PF1: (pf1, 1, [4, 12]),
+    PF2: (pf2, 2, [4, 12]),
+    PF3: (pf3, 3, [12]),
+    PF4: (pf4, 4, [12]),
+    PF5: (pf5, 5, [12]),
+    PF6: (pf6, 6, [3, 5, 6, 8, 9]),
+    PF7: (pf7, 7, [3, 5, 6, 8, 9]),
+    PF8: (pf8, 8, [5, 6, 9, 10]),
+    PF9: (pf9, 9, [5, 6, 9, 10]),
+    PF10: (pf10, 10, [9, 13, 14]),
+    PF11: (pf11, 11, [5, 12, 13]),
+    PF12: (pf12, 12, [12]),
+    PF13: (pf13, 13, [12]),
+    PF14: (pf14, 14, [12]),
+    PF15: (pf15, 15, [12]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOG, gpiog, PG, 'G', PGn, [
+    PG0: (pg0, 0, [12]),
+    PG1: (pg1, 1, [12]),
+    PG2: (pg2, 2, [12]),
+    PG3: (pg3, 3, [12]),
+    PG4: (pg4, 4, [12]),
+    PG5: (pg5, 5, [12]),
+    PG6: (pg6, 6, [13, 14]),
+    PG7: (pg7, 7, [6, 8, 12, 13, 14]),
+    PG8: (pg8, 8, [5, 8, 11, 12, 14]),
+    PG9: (pg9, 9, [8, 9, 12, 13]),
+    PG10: (pg10, 10, [9, 12, 13, 14]),
+    PG11: (pg11, 11, [11, 13, 14]),
+    PG12: (pg12, 12, [5, 8, 9, 12, 14]),
+    PG13: (pg13, 13, [0, 5, 8, 11, 12, 14]),
+    PG14: (pg14, 14, [0, 5, 8, 9, 11, 12, 14]),
+    PG15: (pg15, 15, [8, 12, 13]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOH, gpioh, PH, 'H', PHn, [
+    PH0: (ph0, 0, []),
+    PH1: (ph1, 1, []),
+    PH2: (ph2, 2, [9, 11, 12, 14]),
+    PH3: (ph3, 3, [9, 11, 12, 14]),
+    PH4: (ph4, 4, [4, 9, 10, 14]),
+    PH5: (ph5, 5, [4, 5, 12]),
+    PH6: (ph6, 6, [4, 5, 9, 11, 12, 13]),
+    PH7: (ph7, 7, [4, 5, 11, 12, 13]),
+    PH8: (ph8, 8, [4, 12, 13, 14]),
+    PH9: (ph9, 9, [4, 9, 12, 13, 14]),
+    PH10: (ph10, 10, [2, 12, 13, 14]),
+    PH11: (ph11, 11, [2, 12, 13, 14]),
+    PH12: (ph12, 12, [2, 12, 13, 14]),
+    PH13: (ph13, 13, [3, 9, 12, 14]),
+    PH14: (ph14, 14, [3, 12, 13, 14]),
+    PH15: (ph15, 15, [3, 12, 13, 14]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOI, gpioi, PI, 'I', PIn, [
+    PI0: (pi0, 0, [2, 5, 12, 13, 14]),
+    PI1: (pi1, 1, [5, 12, 13, 14]),
+    PI2: (pi2, 2, [3, 5, 6, 12, 13, 14]),
+    PI3: (pi3, 3, [3, 5, 12, 13]),
+    PI4: (pi4, 4, [3, 12, 13, 14]),
+    PI5: (pi5, 5, [3, 12, 13, 14]),
+    PI6: (pi6, 6, [3, 12, 13, 14]),
+    PI7: (pi7, 7, [3, 12, 13, 14]),
+    PI8: (pi8, 8, []),
+    PI9: (pi9, 9, [9, 12, 14]),
+    PI10: (pi10, 10, [11, 12, 14]),
+    PI11: (pi11, 11, [9, 10]),
+    PI12: (pi12, 12, [14]),
+    PI13: (pi13, 13, [14]),
+    PI14: (pi14, 14, [14]),
+    PI15: (pi15, 15, [9, 14]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOJ, gpioj, PJ, 'J', PJn, [
+    PJ0: (pj0, 0, [9, 14]),
+    PJ1: (pj1, 1, [14]),
+    PJ2: (pj2, 2, [13, 14]),
+    PJ3: (pj3, 3, [14]),
+    PJ4: (pj4, 4, [14]),
+    PJ5: (pj5, 5, [14]),
+    PJ12: (pj12, 12, [9, 14]),
+    PJ13: (pj13, 13, [9, 14]),
+    PJ14: (pj14, 14, [14]),
+    PJ15: (pj15, 15, [14]),
+]);
+
+#[cfg(feature = "gpio-f469")]
+gpio!(GPIOK, gpiok, PK, 'K', PKn, [
+    PK3: (pk3, 3, [14]),
+    PK4: (pk4, 4, [14]),
+    PK5: (pk5, 5, [14]),
+    PK6: (pk6, 6, [14]),
+    PK7: (pk7, 7, [14]),
+]);
+
+/*#[cfg(any(
+    feature = "gpio-f401",
+    feature = "gpio-f410",
+    feature = "gpio-f411",
+    feature = "gpio-f412",
+    feature = "gpio-f413",
+    feature = "gpio-f446"
+))]
+gpio!(GPIOI, gpioi, PI, 'I', PIn, [
+    PI8: (pi8, 8, []),
+]);*/
 
 struct Gpio<const P: char>;
 impl<const P: char> Gpio<P> {
@@ -941,7 +1846,7 @@ impl<const P: char> Gpio<P> {
             'J' => crate::pac::GPIOJ::ptr() as _,
             #[cfg(feature = "gpiok")]
             'K' => crate::pac::GPIOK::ptr() as _,
-            _ => crate::pac::GPIOA::ptr(),
+            _ => panic!("Unknown GPIO port"),
         }
     }
 }

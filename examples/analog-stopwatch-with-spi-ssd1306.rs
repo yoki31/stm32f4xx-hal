@@ -11,12 +11,12 @@ use panic_semihosting as _;
 use stm32f4xx_hal as hal;
 
 use crate::hal::{
-    gpio::{gpioa::PA0, Edge, Input, PullDown},
+    gpio::{Edge, Input, PA0},
     interrupt, pac,
     prelude::*,
     rcc::{Clocks, Rcc},
     spi::Spi,
-    timer::{CountDownTimer, Event, Timer},
+    timer::{CounterUs, Event, FTimer, Timer},
 };
 
 use core::cell::{Cell, RefCell};
@@ -43,10 +43,9 @@ use ssd1306::{prelude::*, Ssd1306};
 // Set up global state. It's all mutexed up for concurrency safety.
 static ELAPSED_MS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0u32));
 static ELAPSED_RESET_MS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0u32));
-static TIMER_TIM2: Mutex<RefCell<Option<CountDownTimer<pac::TIM2>>>> =
-    Mutex::new(RefCell::new(None));
+static TIMER_TIM2: Mutex<RefCell<Option<CounterUs<pac::TIM2>>>> = Mutex::new(RefCell::new(None));
 static STATE: Mutex<Cell<StopwatchState>> = Mutex::new(Cell::new(StopwatchState::Ready));
-static BUTTON: Mutex<RefCell<Option<PA0<Input<PullDown>>>>> = Mutex::new(RefCell::new(None));
+static BUTTON: Mutex<RefCell<Option<PA0<Input>>>> = Mutex::new(RefCell::new(None));
 
 /// The center of the clock face
 const CENTER: Point = Point::new(64, 40);
@@ -102,7 +101,7 @@ fn main() -> ! {
             polarity: Polarity::IdleLow,
             phase: Phase::CaptureOnFirstTransition,
         },
-        2000.khz(),
+        2000.kHz(),
         &clocks,
     );
 
@@ -113,7 +112,7 @@ fn main() -> ! {
 
     let dc = gpioe.pe3.into_push_pull_output();
     let mut ss = gpioe.pe4.into_push_pull_output();
-    let mut delay = hal::delay::Delay::new(cp.SYST, &clocks);
+    let mut delay = Timer::syst(cp.SYST, &clocks).delay();
 
     ss.set_high();
     delay.delay_ms(100_u32);
@@ -127,9 +126,9 @@ fn main() -> ! {
     disp.flush().unwrap();
 
     // Create a 1ms periodic interrupt from TIM2
-    let mut timer = Timer::new(dp.TIM2, &clocks).count_down();
-    timer.start(1.hz());
-    timer.listen(Event::TimeOut);
+    let mut timer = FTimer::new(dp.TIM2, &clocks).counter();
+    timer.start(1.secs()).unwrap();
+    timer.listen(Event::Update);
 
     free(|cs| {
         TIMER_TIM2.borrow(cs).replace(Some(timer));
@@ -210,10 +209,10 @@ fn main() -> ! {
 
 fn setup_clocks(rcc: Rcc) -> Clocks {
     rcc.cfgr
-        .hclk(180.mhz())
-        .sysclk(180.mhz())
-        .pclk1(45.mhz())
-        .pclk2(90.mhz())
+        .hclk(180.MHz())
+        .sysclk(180.MHz())
+        .pclk1(45.MHz())
+        .pclk2(90.MHz())
         .freeze()
 }
 
@@ -264,7 +263,7 @@ fn EXTI0() {
 fn TIM2() {
     free(|cs| {
         if let Some(ref mut tim2) = TIMER_TIM2.borrow(cs).borrow_mut().deref_mut() {
-            tim2.clear_interrupt(Event::TimeOut);
+            tim2.clear_interrupt(Event::Update);
         }
 
         let cell = ELAPSED_MS.borrow(cs);

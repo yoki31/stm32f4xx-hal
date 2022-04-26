@@ -7,7 +7,6 @@ use panic_semihosting as _;
 mod app {
     use cortex_m_semihosting::hprintln;
     use dwt_systick_monotonic::DwtSystick;
-    pub use fugit::ExtU32;
 
     use stm32f4xx_hal::{
         adc::{
@@ -26,7 +25,7 @@ mod app {
     type MyMono = DwtSystick<MONO_HZ>;
 
     type DMATransfer =
-        Transfer<Stream0<DMA2>, Adc<ADC1>, PeripheralToMemory, &'static mut [u16; 2], 0>;
+        Transfer<Stream0<DMA2>, 0, Adc<ADC1>, PeripheralToMemory, &'static mut [u16; 2]>;
 
     #[shared]
     struct Shared {
@@ -45,12 +44,12 @@ mod app {
         let rcc = device.RCC.constrain();
         let _clocks = rcc
             .cfgr
-            .use_hse(25.mhz())
+            .use_hse(25.MHz())
             .require_pll48clk()
-            .sysclk(84.mhz())
-            .hclk(84.mhz())
-            .pclk1(42.mhz())
-            .pclk2(84.mhz())
+            .sysclk(MONO_HZ.Hz())
+            .hclk(MONO_HZ.Hz())
+            .pclk1(42.MHz())
+            .pclk2(84.MHz())
             .freeze();
 
         let mut dcb = cx.core.DCB;
@@ -107,10 +106,13 @@ mod app {
     #[task(binds = DMA2_STREAM0, shared = [transfer], local = [buffer])]
     fn dma(cx: dma::Context) {
         let dma::Context { mut shared, local } = cx;
-        let (buffer, _) = shared.transfer.lock(|transfer| {
-            transfer
+        let (buffer, sample_to_millivolts) = shared.transfer.lock(|transfer| {
+            let (buffer, _) = transfer
                 .next_transfer(local.buffer.take().unwrap())
-                .unwrap()
+                .unwrap();
+
+            let sample_to_millivolts = transfer.peripheral().make_sample_to_millivolts();
+            (buffer, sample_to_millivolts)
         });
 
         let raw_temp = buffer[0];
@@ -122,7 +124,7 @@ mod app {
         let cal110 = VtempCal110::get().read() as f32;
 
         let temperature = (110.0 - 30.0) * ((raw_temp as f32) - cal30) / (cal110 - cal30) + 30.0;
-        let voltage = (raw_volt as f32) / ((2_i32.pow(12) - 1) as f32) * 3.3;
+        let voltage = sample_to_millivolts(raw_volt);
 
         hprintln!("temperature: {}, voltage: {}", temperature, voltage).unwrap();
     }

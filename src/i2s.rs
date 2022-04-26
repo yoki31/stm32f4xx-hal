@@ -4,12 +4,12 @@
 
 use crate::gpio::{Const, NoPin, PinA, PushPull, SetAlternate};
 #[cfg(feature = "stm32_i2s_v12x")]
-use stm32_i2s_v12x::{Instance, RegisterBlock};
+use stm32_i2s_v12x::RegisterBlock;
 
-use crate::pac::RCC;
+use crate::pac::{self, RCC};
 use crate::rcc;
-use crate::time::Hertz;
 use crate::{rcc::Clocks, spi};
+use fugit::HertzU32 as Hertz;
 
 // I2S pins are mostly the same as the corresponding SPI pins:
 // MOSI -> SD
@@ -48,10 +48,10 @@ pub trait Pins<SPI> {
 impl<SPI, WS, CK, MCLK, SD, const WSA: u8, const CKA: u8, const MCLKA: u8, const SDA: u8> Pins<SPI>
     for (WS, CK, MCLK, SD)
 where
-    WS: PinA<Ws, SPI, A = Const<WSA>> + SetAlternate<PushPull, WSA>,
-    CK: PinA<Ck, SPI, A = Const<CKA>> + SetAlternate<PushPull, CKA>,
-    MCLK: PinA<Mck, SPI, A = Const<MCLKA>> + SetAlternate<PushPull, MCLKA>,
-    SD: PinA<Sd, SPI, A = Const<SDA>> + SetAlternate<PushPull, SDA>,
+    WS: PinA<Ws, SPI, A = Const<WSA>> + SetAlternate<WSA, PushPull>,
+    CK: PinA<Ck, SPI, A = Const<CKA>> + SetAlternate<CKA, PushPull>,
+    MCLK: PinA<Mck, SPI, A = Const<MCLKA>> + SetAlternate<MCLKA, PushPull>,
+    SD: PinA<Sd, SPI, A = Const<SDA>> + SetAlternate<SDA, PushPull>,
 {
     fn set_alt_mode(&mut self) {
         self.0.set_alt_mode();
@@ -67,11 +67,13 @@ where
     }
 }
 
+pub trait Instance: I2sFreq + rcc::Enable + rcc::Reset {}
+
 pub trait I2sFreq {
     fn i2s_freq(clocks: &Clocks) -> Hertz;
 }
 
-/// Implements Instance for I2s<$SPIX, _> and creates an I2s::$spix function to create and enable
+/// Implements stm32_i2s_v12x::Instance for I2s<$SPIX, _> and creates an I2s::$spix function to create and enable
 /// the peripheral
 ///
 /// $SPIX: The fully-capitalized name of the SPI peripheral (example: SPI1)
@@ -80,8 +82,12 @@ pub trait I2sFreq {
 /// $clock: The name of the Clocks function that returns the frequency of the I2S clock input
 /// to this SPI peripheral (i2s_cl, i2s_apb1_clk, or i2s2_apb_clk)
 macro_rules! i2s {
-    ($SPIX:ty, $clock:ident) => {
-        impl I2sFreq for $SPIX {
+    ($SPI:ty, $I2s:ident, $clock:ident) => {
+        pub type $I2s<PINS> = I2s<$SPI, PINS>;
+
+        impl Instance for $SPI {}
+
+        impl I2sFreq for $SPI {
             fn i2s_freq(clocks: &Clocks) -> Hertz {
                 clocks
                     .$clock()
@@ -90,29 +96,52 @@ macro_rules! i2s {
         }
 
         #[cfg(feature = "stm32_i2s_v12x")]
-        unsafe impl<PINS> Instance for I2s<$SPIX, PINS> {
-            const REGISTERS: *mut RegisterBlock = <$SPIX>::ptr() as *mut _;
+        unsafe impl<PINS> stm32_i2s_v12x::Instance for I2s<$SPI, PINS> {
+            const REGISTERS: *mut RegisterBlock = <$SPI>::ptr() as *mut _;
         }
     };
 }
 
-impl<SPI, PINS> I2s<SPI, PINS>
+pub trait I2sExt: Sized + Instance {
+    fn i2s<WS, CK, MCLK, SD>(
+        self,
+        pins: (WS, CK, MCLK, SD),
+        clocks: &Clocks,
+    ) -> I2s<Self, (WS, CK, MCLK, SD)>
+    where
+        (WS, CK, MCLK, SD): Pins<Self>;
+}
+
+impl<SPI: Instance> I2sExt for SPI {
+    fn i2s<WS, CK, MCLK, SD>(
+        self,
+        pins: (WS, CK, MCLK, SD),
+        clocks: &Clocks,
+    ) -> I2s<Self, (WS, CK, MCLK, SD)>
+    where
+        (WS, CK, MCLK, SD): Pins<Self>,
+    {
+        I2s::new(self, pins, clocks)
+    }
+}
+
+impl<SPI, WS, CK, MCLK, SD> I2s<SPI, (WS, CK, MCLK, SD)>
 where
-    SPI: I2sFreq + rcc::Enable + rcc::Reset,
-    PINS: Pins<SPI>,
+    SPI: Instance,
+    (WS, CK, MCLK, SD): Pins<SPI>,
 {
     /// Creates an I2s object around an SPI peripheral and pins
     ///
     /// This function enables and resets the SPI peripheral, but does not configure it.
     ///
-    /// The returned I2s object implements [stm32_i2s_v12x::Instance], so it can be used
+    /// The returned I2s object implements `stm32_i2s_v12x::Instance`, so it can be used
     /// to configure the peripheral and communicate.
     ///
     /// # Panics
     ///
     /// This function panics if the I2S clock input (from the I2S PLL or similar)
     /// is not configured.
-    pub fn new(spi: SPI, mut pins: PINS, clocks: &Clocks) -> Self {
+    pub fn new(spi: SPI, mut pins: (WS, CK, MCLK, SD), clocks: &Clocks) -> Self {
         let input_clock = SPI::i2s_freq(clocks);
         unsafe {
             // NOTE(unsafe) this reference will only be used for atomic writes with no side effects.
@@ -131,10 +160,13 @@ where
         }
     }
 
-    pub fn release(mut self) -> (SPI, PINS) {
+    pub fn release(mut self) -> (SPI, (WS, CK, MCLK, SD)) {
         self.pins.restore_mode();
 
-        (self.spi, self.pins)
+        (
+            self.spi,
+            (self.pins.0, self.pins.1, self.pins.2, self.pins.3),
+        )
     }
 }
 
@@ -143,14 +175,14 @@ where
 // have two different I2S clocks while other models have only one.
 
 #[cfg(any(feature = "stm32f410", feature = "stm32f411"))]
-i2s!(crate::pac::SPI1, i2s_clk);
+i2s!(pac::SPI1, I2s1, i2s_clk);
 #[cfg(any(
     feature = "stm32f412",
     feature = "stm32f413",
     feature = "stm32f423",
     feature = "stm32f446",
 ))]
-i2s!(crate::pac::SPI1, i2s_apb2_clk);
+i2s!(pac::SPI1, I2s1, i2s_apb2_clk);
 
 // All STM32F4 models support SPI2/I2S2
 #[cfg(not(any(
@@ -159,14 +191,14 @@ i2s!(crate::pac::SPI1, i2s_apb2_clk);
     feature = "stm32f423",
     feature = "stm32f446",
 )))]
-i2s!(crate::pac::SPI2, i2s_clk);
+i2s!(pac::SPI2, I2s2, i2s_clk);
 #[cfg(any(
     feature = "stm32f412",
     feature = "stm32f413",
     feature = "stm32f423",
     feature = "stm32f446",
 ))]
-i2s!(crate::pac::SPI2, i2s_apb1_clk);
+i2s!(pac::SPI2, I2s2, i2s_apb1_clk);
 
 // All STM32F4 models except STM32F410 support SPI3/I2S3
 #[cfg(any(
@@ -183,24 +215,24 @@ i2s!(crate::pac::SPI2, i2s_apb1_clk);
     feature = "stm32f469",
     feature = "stm32f479",
 ))]
-i2s!(crate::pac::SPI3, i2s_clk);
+i2s!(pac::SPI3, I2s3, i2s_clk);
 #[cfg(any(
     feature = "stm32f412",
     feature = "stm32f413",
     feature = "stm32f423",
     feature = "stm32f446",
 ))]
-i2s!(crate::pac::SPI3, i2s_apb1_clk);
+i2s!(pac::SPI3, I2s3, i2s_apb1_clk);
 
 #[cfg(feature = "stm32f411")]
-i2s!(crate::pac::SPI4, i2s_clk);
+i2s!(pac::SPI4, I2s4, i2s_clk);
 #[cfg(any(feature = "stm32f412", feature = "stm32f413", feature = "stm32f423"))]
-i2s!(crate::pac::SPI4, i2s_apb2_clk);
+i2s!(pac::SPI4, I2s4, i2s_apb2_clk);
 
 #[cfg(any(feature = "stm32f410", feature = "stm32f411"))]
-i2s!(crate::pac::SPI5, i2s_clk);
+i2s!(pac::SPI5, I2s5, i2s_clk);
 #[cfg(any(feature = "stm32f412", feature = "stm32f413", feature = "stm32f423"))]
-i2s!(crate::pac::SPI5, i2s_apb2_clk);
+i2s!(pac::SPI5, I2s5, i2s_apb2_clk);
 
 /// An I2s wrapper around an SPI object and pins
 pub struct I2s<I, PINS> {
@@ -228,7 +260,7 @@ mod dma {
     /// I2S DMA reads from and writes to the data register
     unsafe impl<SPI, PINS, MODE> PeriAddress for stm32_i2s_v12x::I2s<I2s<SPI, PINS>, MODE>
     where
-        I2s<SPI, PINS>: Instance,
+        I2s<SPI, PINS>: stm32_i2s_v12x::Instance,
         PINS: Pins<SPI>,
         SPI: Deref<Target = crate::pac::spi1::RegisterBlock>,
     {
@@ -243,10 +275,10 @@ mod dma {
     }
 
     /// DMA is available for I2S based on the underlying implementations for SPI
-    unsafe impl<SPI, PINS, MODE, STREAM, DIR, const CHANNEL: u8> DMASet<STREAM, DIR, CHANNEL>
+    unsafe impl<SPI, PINS, MODE, STREAM, const CHANNEL: u8, DIR> DMASet<STREAM, CHANNEL, DIR>
         for stm32_i2s_v12x::I2s<I2s<SPI, PINS>, MODE>
     where
-        SPI: DMASet<STREAM, DIR, CHANNEL>,
+        SPI: DMASet<STREAM, CHANNEL, DIR>,
     {
     }
 }

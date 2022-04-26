@@ -1,10 +1,10 @@
 //! Generate random numbers using the RNG peripheral and display the values.
 //! This example is specifically tuned to run correctly on the
 //! stm32f4-discovery board (model STM32F407G-DISC1)
-//! This example requires the `rt` feature to be enabled. For example:
+//! For example:
 //!
 //! ```bash
-//! cargo run --release --features stm32f407,rt  --example rng-display
+//! cargo run --release --features stm32f407 --example rng-display
 //! ```
 //!
 //! Note that this example requires the `--release` build flag because it is too
@@ -61,11 +61,11 @@ fn main() -> ! {
         // from which RNG_CLK is derived, is about 48 MHz
         let clocks = rcc
             .cfgr
-            .use_hse(8.mhz()) //discovery board has 8 MHz crystal for HSE
-            .sysclk(128.mhz())
+            .use_hse(8.MHz()) //discovery board has 8 MHz crystal for HSE
+            .sysclk(128.MHz())
             .freeze();
 
-        let mut delay_source = hal::delay::Delay::new(cp.SYST, &clocks);
+        let mut delay_source = cp.SYST.delay(&clocks);
 
         // Set up I2C1: SCL is PB8 and SDA is PB9; they are set to Alternate Function 4
         // as per the STM32F407 datasheet. Pin assignment as per the
@@ -73,7 +73,7 @@ fn main() -> ! {
         let gpiob = dp.GPIOB.split();
         let scl = gpiob.pb8.into_alternate().set_open_drain();
         let sda = gpiob.pb9.into_alternate().set_open_drain();
-        let i2c = I2c::new(dp.I2C1, (scl, sda), 400.khz(), &clocks);
+        let i2c = I2c::new(dp.I2C1, (scl, sda), 400.kHz(), &clocks);
 
         // Set up the display
         let interface = I2CDisplayInterface::new(i2c);

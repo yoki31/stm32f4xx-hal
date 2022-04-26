@@ -1,14 +1,26 @@
 //! Watchdog peripherals
 
-use crate::{
-    hal::watchdog::{Watchdog, WatchdogEnable},
-    pac::{DBGMCU, IWDG},
-    time::MilliSeconds,
-};
+use crate::pac::{DBGMCU, IWDG};
+use core::fmt;
+use embedded_hal::watchdog::{Watchdog, WatchdogEnable};
+use fugit::MillisDurationU32 as MilliSeconds;
 
 /// Wraps the Independent Watchdog (IWDG) peripheral
 pub struct IndependentWatchdog {
     iwdg: IWDG,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for IndependentWatchdog {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "IndependentWatchdog");
+    }
+}
+
+impl fmt::Debug for IndependentWatchdog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IndependentWatchdog")
+    }
 }
 
 const MAX_PR: u8 = 0b110;
@@ -55,7 +67,7 @@ impl IndependentWatchdog {
         let pr = self.iwdg.pr.read().pr().bits();
         let rl = self.iwdg.rlr.read().rl().bits();
         let ms = Self::timeout_period(pr, rl);
-        MilliSeconds(ms)
+        MilliSeconds::from_ticks(ms)
     }
 
     /// pr: Prescaler divider bits, rl: reload value
@@ -85,20 +97,28 @@ impl IndependentWatchdog {
         self.iwdg.kr.write(|w| unsafe { w.key().bits(KR_RELOAD) });
         a
     }
+
+    pub fn start(&mut self, period: MilliSeconds) {
+        self.setup(period.ticks());
+
+        self.iwdg.kr.write(|w| unsafe { w.key().bits(KR_START) });
+    }
+
+    pub fn feed(&mut self) {
+        self.iwdg.kr.write(|w| unsafe { w.key().bits(KR_RELOAD) });
+    }
 }
 
 impl WatchdogEnable for IndependentWatchdog {
     type Time = MilliSeconds;
 
     fn start<T: Into<Self::Time>>(&mut self, period: T) {
-        self.setup(period.into().0);
-
-        self.iwdg.kr.write(|w| unsafe { w.key().bits(KR_START) });
+        self.start(period.into())
     }
 }
 
 impl Watchdog for IndependentWatchdog {
     fn feed(&mut self) {
-        self.iwdg.kr.write(|w| unsafe { w.key().bits(KR_RELOAD) });
+        self.feed()
     }
 }

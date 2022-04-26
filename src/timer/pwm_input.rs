@@ -1,13 +1,12 @@
-use crate::{
-    time::Hertz,
-    timer::{CPin, General, Timer, C1},
-};
-use cast::u16;
+use super::{CPin, General, Instance, Timer, WithPwm};
+use core::convert::TryFrom;
+use core::ops::{Deref, DerefMut};
+use fugit::HertzU32 as Hertz;
 
 pub trait Pins<TIM> {}
 
 // implement the `Pins` trait wherever PC1 implements CPin<C1>
-impl<TIM, PC1> Pins<TIM> for PC1 where PC1: CPin<C1, TIM> {}
+impl<TIM, PC1> Pins<TIM> for PC1 where PC1: CPin<TIM, 0> {}
 
 /// Represents a TIMer configured as a PWM input.
 /// This peripheral will emit an interrupt on CC2 events, which occurs at two times in this mode:
@@ -34,10 +33,45 @@ impl<TIM, PC1> Pins<TIM> for PC1 where PC1: CPin<C1, TIM> {}
 ///             let duty = monitor.get_duty_cycle();
 /// }
 /// ```
-pub struct PwmInput<TIM, PINS: Pins<TIM>> {
-    tim: TIM,
-    clk: Hertz,
-    pins: PINS,
+pub struct PwmInput<TIM, PINS>
+where
+    TIM: Instance + WithPwm,
+    PINS: Pins<TIM>,
+{
+    timer: Timer<TIM>,
+    _pins: PINS,
+}
+
+impl<TIM, PINS> Deref for PwmInput<TIM, PINS>
+where
+    TIM: Instance + WithPwm,
+    PINS: Pins<TIM>,
+{
+    type Target = Timer<TIM>;
+    fn deref(&self) -> &Self::Target {
+        &self.timer
+    }
+}
+
+impl<TIM, PINS> DerefMut for PwmInput<TIM, PINS>
+where
+    TIM: Instance + WithPwm,
+    PINS: Pins<TIM>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.timer
+    }
+}
+
+impl<TIM, PINS> PwmInput<TIM, PINS>
+where
+    TIM: Instance + WithPwm,
+    PINS: Pins<TIM>,
+{
+    pub fn release(mut self) -> Timer<TIM> {
+        self.tim.cr1_reset();
+        self.timer
+    }
 }
 
 #[cfg(not(feature = "stm32f410"))]
@@ -59,9 +93,8 @@ macro_rules! hal {
             /// 2. When the period is captured. the duty cycle will be an observable value.
             /// See the pwm input example for an suitable interrupt handler.
             #[allow(unused_unsafe)] //for some chips the operations are considered safe.
-            pub fn pwm_input<T, PINS>(mut self, best_guess: T, pins: PINS) -> PwmInput<$TIM, PINS>
+            pub fn pwm_input<PINS>(mut self, best_guess: Hertz, pins: PINS) -> PwmInput<$TIM, PINS>
             where
-                T: Into<Hertz>,
                 PINS: Pins<$TIM>,
             {
                 /*
@@ -69,8 +102,8 @@ macro_rules! hal {
                 Sets the TIMer's prescaler such that the TIMer that it ticks at about the best-guess
                  frequency.
                 */
-                let ticks = self.clk.0 / best_guess.into().0;
-                let psc = u16((ticks - 1) / (1 << 16)).unwrap();
+                let ticks = self.clk.raw() / best_guess.raw();
+                let psc = u16::try_from((ticks - 1) / (1 << 16)).unwrap();
                 self.tim.set_prescaler(psc);
 
                 // Seemingly this needs to be written to
@@ -139,9 +172,7 @@ macro_rules! hal {
                 // enable the counter.
                 self.tim.enable_counter();
 
-                let Self { tim, clk } = self;
-
-                PwmInput { tim, clk, pins }
+                PwmInput { timer: self, _pins: pins }
             }
         }
 
@@ -149,14 +180,6 @@ macro_rules! hal {
         where
             PINS: Pins<$TIM>,
         {
-            pub fn reclaim(self) -> (Timer<$TIM>, PINS) {
-                // disable timer
-                self.tim.cr1.modify(|_, w| w.cen().disabled());
-                // decompose elements
-                let Self { tim, clk, pins } = self;
-                // and return them to the caller
-                (Timer { tim, clk }, pins)
-            }
             /// Period of PWM signal in terms of clock cycles
             pub fn get_period_clocks(&self) -> <$TIM as General>::Width {
                 self.tim.ccr1.read().ccr().bits()

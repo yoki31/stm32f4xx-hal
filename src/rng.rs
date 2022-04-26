@@ -2,7 +2,7 @@
 //!
 //!
 //! The build in random number generator (RNG) of an STM32F4 uses analog noise to
-//! proved random 32-bit values.
+//! provide random 32-bit values.
 //!
 //! Notes:
 //! - It takes 40 periods of `RNG_CLK` to generate a new random value.
@@ -23,13 +23,13 @@
 use core::cmp;
 use core::mem;
 
-use crate::hal::blocking::rng;
 use crate::pac;
 use crate::pac::RNG;
 use crate::rcc::{Clocks, Enable, Reset};
-use crate::time::U32Ext;
 use core::num::NonZeroU32;
 use core::ops::Shl;
+use embedded_hal::blocking::rng;
+use fugit::RateExtU32;
 use rand_core::RngCore;
 
 /// Random number generator specific errors
@@ -91,8 +91,8 @@ impl RngExt for RNG {
 
             // verify the clock configuration is valid
             let hclk = clocks.hclk();
-            let rng_clk = clocks.pll48clk().unwrap_or_else(|| 0u32.hz());
-            assert!(rng_clk.0 >= (hclk.0 / 16));
+            let rng_clk = clocks.pll48clk().unwrap_or_else(|| 0.Hz());
+            assert!(rng_clk >= (hclk / 16));
 
             // enable the RNG peripheral
             self.cr.modify(|_, w| w.rngen().set_bit());

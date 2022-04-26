@@ -25,10 +25,10 @@ fn main() -> ! {
 
         // Set up the system clock. We want to run at 48MHz for this one.
         let rcc = dp.RCC.constrain();
-        let clocks = rcc.cfgr.sysclk(48.mhz()).freeze();
+        let clocks = rcc.cfgr.sysclk(48.MHz()).freeze();
 
         // Create a delay abstraction based on SysTick
-        let mut delay = hal::delay::Delay::new(cp.SYST, &clocks);
+        let mut delay = cp.SYST.delay(&clocks);
 
         loop {
             // On for 1s, off for 1s.

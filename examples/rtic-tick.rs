@@ -5,12 +5,11 @@ use panic_halt as _;
 
 #[rtic::app(device = stm32f4xx_hal::pac, dispatchers = [USART1])]
 mod app {
-    use fugit::ExtU32;
     use stm32f4xx_hal::{
-        gpio::{gpioc::PC13, Output, PushPull},
+        gpio::{Output, PC13},
         pac,
         prelude::*,
-        timer::{monotonic::MonoTimer, Timer},
+        timer::MonoTimerUs,
     };
 
     #[shared]
@@ -18,21 +17,21 @@ mod app {
 
     #[local]
     struct Local {
-        led: PC13<Output<PushPull>>,
+        led: PC13<Output>,
     }
 
     #[monotonic(binds = TIM2, default = true)]
-    type MicrosecMono = MonoTimer<pac::TIM2, 1_000_000>;
+    type MicrosecMono = MonoTimerUs<pac::TIM2>;
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         let rcc = ctx.device.RCC.constrain();
-        let clocks = rcc.cfgr.sysclk(48.mhz()).freeze();
+        let clocks = rcc.cfgr.sysclk(48.MHz()).freeze();
 
         let gpioc = ctx.device.GPIOC.split();
         let led = gpioc.pc13.into_push_pull_output();
 
-        let mono = Timer::new(ctx.device.TIM2, &clocks).monotonic();
+        let mono = ctx.device.TIM2.monotonic_us(&clocks);
         tick::spawn().ok();
         (Shared {}, Local { led }, init::Monotonics(mono))
     }

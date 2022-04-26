@@ -9,7 +9,11 @@ pub trait Instance: crate::Sealed + rcc::Enable + rcc::Reset {}
 
 // Implemented by all SPI instances
 impl Instance for CAN1 {}
+pub type Can1<PINS> = Can<CAN1, PINS>;
 impl Instance for CAN2 {}
+pub type Can2<PINS> = Can<CAN2, PINS>;
+#[cfg(feature = "can3")]
+pub type Can3<PINS> = Can<crate::pac::CAN3, PINS>;
 
 pub struct Tx;
 impl crate::Sealed for Tx {}
@@ -23,8 +27,8 @@ pub trait Pins<CAN> {
 
 impl<CAN, TX, RX, const TXA: u8, const RXA: u8> Pins<CAN> for (TX, RX)
 where
-    TX: PinA<Tx, CAN, A = Const<TXA>> + SetAlternate<PushPull, TXA>,
-    RX: PinA<Rx, CAN, A = Const<RXA>> + SetAlternate<PushPull, RXA>,
+    TX: PinA<Tx, CAN, A = Const<TXA>> + SetAlternate<TXA, PushPull>,
+    RX: PinA<Rx, CAN, A = Const<RXA>> + SetAlternate<RXA, PushPull>,
 {
     fn set_alt_mode(&mut self) {
         self.0.set_alt_mode();
@@ -53,19 +57,52 @@ mod can3 {
     }
 }
 
+pub trait CanExt: Sized + Instance {
+    fn can<TX, RX>(self, pins: (TX, RX)) -> Can<Self, (TX, RX)>
+    where
+        (TX, RX): Pins<Self>;
+    fn tx<TX>(self, tx_pin: TX) -> Can<Self, (TX, NoPin)>
+    where
+        (TX, NoPin): Pins<Self>;
+    fn rx<RX>(self, rx_pin: RX) -> Can<Self, (NoPin, RX)>
+    where
+        (NoPin, RX): Pins<Self>;
+}
+
+impl<CAN: Instance> CanExt for CAN {
+    fn can<TX, RX>(self, pins: (TX, RX)) -> Can<Self, (TX, RX)>
+    where
+        (TX, RX): Pins<Self>,
+    {
+        Can::new(self, pins)
+    }
+    fn tx<TX>(self, tx_pin: TX) -> Can<Self, (TX, NoPin)>
+    where
+        (TX, NoPin): Pins<Self>,
+    {
+        Can::tx(self, tx_pin)
+    }
+    fn rx<RX>(self, rx_pin: RX) -> Can<Self, (NoPin, RX)>
+    where
+        (NoPin, RX): Pins<Self>,
+    {
+        Can::rx(self, rx_pin)
+    }
+}
+
 /// Interface to the CAN peripheral.
 pub struct Can<CAN, PINS> {
     can: CAN,
     pins: PINS,
 }
 
-impl<CAN, PINS> Can<CAN, PINS>
+impl<CAN, TX, RX> Can<CAN, (TX, RX)>
 where
     CAN: Instance,
-    PINS: Pins<CAN>,
+    (TX, RX): Pins<CAN>,
 {
     /// Creates a CAN interface.
-    pub fn new(can: CAN, mut pins: PINS) -> Self {
+    pub fn new(can: CAN, mut pins: (TX, RX)) -> Self {
         unsafe {
             // NOTE(unsafe) this reference will only be used for atomic writes with no side effects.
             let rcc = &(*crate::pac::RCC::ptr());
@@ -78,27 +115,27 @@ where
         Can { can, pins }
     }
 
-    pub fn release(mut self) -> (CAN, PINS) {
+    pub fn release(mut self) -> (CAN, (TX, RX)) {
         self.pins.restore_mode();
 
-        (self.can, self.pins)
+        (self.can, (self.pins.0, self.pins.1))
     }
 }
 
-impl<CAN, TX, const TXA: u8> Can<CAN, (TX, NoPin)>
+impl<CAN, TX> Can<CAN, (TX, NoPin)>
 where
     CAN: Instance,
-    TX: PinA<Tx, CAN, A = Const<TXA>> + SetAlternate<PushPull, TXA>,
+    (TX, NoPin): Pins<CAN>,
 {
     pub fn tx(usart: CAN, tx_pin: TX) -> Self {
         Self::new(usart, (tx_pin, NoPin))
     }
 }
 
-impl<CAN, RX, const RXA: u8> Can<CAN, (NoPin, RX)>
+impl<CAN, RX> Can<CAN, (NoPin, RX)>
 where
     CAN: Instance,
-    RX: PinA<Rx, CAN, A = Const<RXA>> + SetAlternate<PushPull, RXA>,
+    (NoPin, RX): Pins<CAN>,
 {
     pub fn rx(usart: CAN, rx_pin: RX) -> Self {
         Self::new(usart, (NoPin, rx_pin))

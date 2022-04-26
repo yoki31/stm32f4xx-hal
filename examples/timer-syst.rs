@@ -4,7 +4,7 @@
 //! stm32f4-discovery board (model STM32F407G-DISC1).
 //!
 //! ```bash
-//! cargo run --release --features stm32f407,rt  --example timer-syst
+//! cargo run --release --features stm32f407  --example timer-syst
 //! ```
 
 #![no_std]
@@ -15,9 +15,7 @@ use panic_halt as _;
 use cortex_m_rt::entry;
 use cortex_m_semihosting::hprintln;
 
-use embedded_hal::timer::Cancel;
-use hal::timer;
-use hal::timer::Timer;
+use hal::timer::Error;
 use stm32f4xx_hal as hal;
 
 use crate::hal::{pac, prelude::*};
@@ -27,11 +25,11 @@ fn main() -> ! {
     let dp = pac::Peripherals::take().unwrap();
     let cp = cortex_m::peripheral::Peripherals::take().unwrap();
     let rcc = dp.RCC.constrain();
-    let clocks = rcc.cfgr.sysclk(24.mhz()).freeze();
+    let clocks = rcc.cfgr.sysclk(24.MHz()).freeze();
 
     // Create a timer based on SysTick
-    let mut timer = Timer::syst(cp.SYST, &clocks).count_down();
-    timer.start(24.hz());
+    let mut timer = cp.SYST.counter_us(&clocks);
+    timer.start(42.millis()).unwrap();
 
     hprintln!("hello!").unwrap();
     // wait until timer expires
@@ -47,13 +45,13 @@ fn main() -> ! {
     timer.cancel().unwrap();
 
     // start it again
-    timer.start(24.hz());
+    timer.start(42.millis()).unwrap();
     nb::block!(timer.wait()).unwrap();
     hprintln!("timer expired 3").unwrap();
 
     timer.cancel().unwrap();
     let cancel_outcome = timer.cancel();
-    assert_eq!(cancel_outcome, Err(timer::Error::Disabled));
+    assert_eq!(cancel_outcome, Err(Error::Disabled));
     hprintln!("ehy, you cannot cancel a timer two times!").unwrap();
     // this time the timer was not restarted, therefore this function should
     // wait forever

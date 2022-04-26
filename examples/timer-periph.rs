@@ -4,7 +4,7 @@
 //! stm32f4-discovery board (model STM32F407G-DISC1).
 //!
 //! ```bash
-//! cargo run --release --features stm32f407,rt  --example timer-periph
+//! cargo run --release --features stm32f407 --example timer-periph
 //! ```
 
 #![no_std]
@@ -15,9 +15,7 @@ use panic_halt as _;
 use cortex_m_rt::entry;
 use cortex_m_semihosting::hprintln;
 
-use embedded_hal::timer::Cancel;
-use hal::timer;
-use hal::timer::Timer;
+use hal::timer::Error;
 use stm32f4xx_hal as hal;
 
 use crate::hal::{pac, prelude::*};
@@ -26,18 +24,18 @@ use crate::hal::{pac, prelude::*};
 fn main() -> ! {
     let dp = pac::Peripherals::take().unwrap();
     let rcc = dp.RCC.constrain();
-    let clocks = rcc.cfgr.sysclk(24.mhz()).freeze();
+    let clocks = rcc.cfgr.sysclk(24.MHz()).freeze();
 
     // Create a timer based on SysTick
-    let mut timer = Timer::new(dp.TIM1, &clocks).count_down();
-    timer.start(1.hz());
+    let mut timer = dp.TIM1.counter_ms(&clocks);
+    timer.start(1.secs()).unwrap();
 
     hprintln!("hello!").unwrap();
     // wait until timer expires
     nb::block!(timer.wait()).unwrap();
     hprintln!("timer expired 1").unwrap();
 
-    // the function syst() creates a periodic timer, so it is automatically
+    // the function counter_ms() creates a periodic timer, so it is automatically
     // restarted
     nb::block!(timer.wait()).unwrap();
     hprintln!("timer expired 2").unwrap();
@@ -46,13 +44,13 @@ fn main() -> ! {
     timer.cancel().unwrap();
 
     // start it again
-    timer.start(1.hz());
+    timer.start(1.secs()).unwrap();
     nb::block!(timer.wait()).unwrap();
     hprintln!("timer expired 3").unwrap();
 
     timer.cancel().unwrap();
     let cancel_outcome = timer.cancel();
-    assert_eq!(cancel_outcome, Err(timer::Error::Disabled));
+    assert_eq!(cancel_outcome, Err(Error::Disabled));
     hprintln!("ehy, you cannot cancel a timer two times!").unwrap();
     // this time the timer was not restarted, therefore this function should
     // wait forever

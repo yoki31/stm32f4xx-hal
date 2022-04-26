@@ -100,7 +100,6 @@ pub use stm32f4::stm32f469 as pac;
 pub use stm32f4::stm32f469 as pac;
 
 // Enable use of interrupt macro
-#[cfg(feature = "rt")]
 pub use crate::pac::interrupt;
 
 #[cfg(feature = "device-selected")]
@@ -117,8 +116,6 @@ pub mod can;
 pub mod crc32;
 #[cfg(all(feature = "device-selected", feature = "dac"))]
 pub mod dac;
-#[cfg(feature = "device-selected")]
-pub mod delay;
 #[cfg(feature = "device-selected")]
 #[cfg(feature = "fmpi2c1")]
 pub mod fmpi2c;
@@ -155,11 +152,6 @@ pub mod fsmc_lcd;
 #[cfg(feature = "device-selected")]
 pub mod prelude;
 #[cfg(feature = "device-selected")]
-pub mod pwm;
-#[cfg(feature = "device-selected")]
-#[cfg(not(feature = "stm32f410"))]
-pub mod pwm_input;
-#[cfg(feature = "device-selected")]
 pub mod qei;
 #[cfg(feature = "device-selected")]
 pub mod rcc;
@@ -188,3 +180,9 @@ mod sealed {
 }
 #[cfg(feature = "device-selected")]
 pub(crate) use sealed::Sealed;
+
+fn stripped_type_name<T>() -> &'static str {
+    let s = core::any::type_name::<T>();
+    let p = s.split("::");
+    p.last().unwrap()
+}

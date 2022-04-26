@@ -4,7 +4,7 @@
 //! To run this feature you can (after installing `probe-run` use:
 //!
 //! ```bash
-//! cargo run --release --example f413disco_lcd_ferris --features="stm32f413,rt,fsmc_lcd"
+//! cargo run --release --example f413disco_lcd_ferris --features="stm32f413,fsmc_lcd"
 //! ```
 
 #![no_main]
@@ -19,7 +19,7 @@ use crate::hal::{
     fsmc_lcd::{ChipSelect3, FsmcLcd, LcdPins, Timing},
     gpio::Speed,
     pac::{CorePeripherals, Peripherals},
-    {delay::Delay, prelude::*},
+    prelude::*,
 };
 
 use embedded_graphics::geometry::Size;
@@ -706,7 +706,7 @@ fn main() -> ! {
 
         // Configure and lock the clocks at maximum warp
         let rcc = p.RCC.constrain();
-        let clocks = rcc.cfgr.sysclk(100.mhz()).freeze();
+        let clocks = rcc.cfgr.sysclk(100.MHz()).freeze();
 
         // Define the pins we need for our 16bit parallel bus
         let lcd_pins = LcdPins {
@@ -735,10 +735,7 @@ fn main() -> ! {
         };
 
         // Setup the RESET pin
-        let rst = gpiob
-            .pb13
-            .into_push_pull_output()
-            .set_speed(Speed::VeryHigh);
+        let rst = gpiob.pb13.into_push_pull_output().speed(Speed::VeryHigh);
 
         // We're not using the "tearing" signal from the display
         let mut _te = gpiob.pb14.into_floating_input();
@@ -747,7 +744,7 @@ fn main() -> ! {
         gpioe.pe5.into_push_pull_output().set_high();
 
         // Get delay provider
-        let mut delay = Delay::new(cp.SYST, &clocks);
+        let mut delay = cp.SYST.delay(&clocks);
 
         // Set up timing
         let write_timing = Timing::default().data(3).address_setup(3).bus_turnaround(0);

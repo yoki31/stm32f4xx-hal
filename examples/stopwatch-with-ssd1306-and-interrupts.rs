@@ -1,10 +1,10 @@
 //! A simple stopwatch app running on an SSD1306 display
 //!
-//! This example requires the `rt` feature to be enabled. For example, to run on an STM32F411 Nucleo
+//! For example, to run on an STM32F411 Nucleo
 //! dev board, run the following:
 //!
 //! ```bash
-//! cargo run --features stm32f411,rt --release --example stopwatch-with-ssd1306-and-interrupts
+//! cargo run --features stm32f411 --release --example stopwatch-with-ssd1306-and-interrupts
 //! ```
 //!
 //! Note that `--release` is required to fix link errors for smaller devices.
@@ -22,13 +22,12 @@ use panic_semihosting as _; // logs messages to the host stderr; requires a debu
 use stm32f4xx_hal as hal;
 
 use crate::hal::{
-    delay::Delay,
-    gpio::{gpioc::PC13, Edge, Input, PullUp},
+    gpio::{Edge, Input, PC13},
     i2c::I2c,
     interrupt, pac,
     prelude::*,
     rcc::{Clocks, Rcc},
-    timer::{CountDownTimer, Event, Timer},
+    timer::{CounterUs, Event, Timer},
 };
 use core::cell::{Cell, RefCell};
 use core::fmt::Write;
@@ -49,10 +48,9 @@ use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
 // Set up global state. It's all mutexed up for concurrency safety.
 static ELAPSED_MS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0u32));
-static TIMER_TIM2: Mutex<RefCell<Option<CountDownTimer<pac::TIM2>>>> =
-    Mutex::new(RefCell::new(None));
+static TIMER_TIM2: Mutex<RefCell<Option<CounterUs<pac::TIM2>>>> = Mutex::new(RefCell::new(None));
 static STATE: Mutex<Cell<StopwatchState>> = Mutex::new(Cell::new(StopwatchState::Ready));
-static BUTTON: Mutex<RefCell<Option<PC13<Input<PullUp>>>>> = Mutex::new(RefCell::new(None));
+static BUTTON: Mutex<RefCell<Option<PC13<Input>>>> = Mutex::new(RefCell::new(None));
 
 #[derive(Clone, Copy)]
 enum StopwatchState {
@@ -73,7 +71,7 @@ fn main() -> ! {
                 gpiob.pb8.into_alternate().set_open_drain(),
                 gpiob.pb9.into_alternate().set_open_drain(),
             ),
-            400.khz(),
+            400.kHz(),
             &clocks,
         );
 
@@ -93,9 +91,11 @@ fn main() -> ! {
         disp.flush().unwrap();
 
         // Create a 1ms periodic interrupt from TIM2
-        let mut timer = Timer::new(dp.TIM2, &clocks).count_down();
-        timer.start(1.hz());
-        timer.listen(Event::TimeOut);
+        let mut timer = dp.TIM2.counter(&clocks);
+        timer.start(1.secs()).unwrap();
+        timer.listen(Event::Update);
+
+        let btn_int_num = board_btn.interrupt(); // hal::pac::Interrupt::EXTI15_10
 
         free(|cs| {
             TIMER_TIM2.borrow(cs).replace(Some(timer));
@@ -104,12 +104,12 @@ fn main() -> ! {
 
         // Enable interrupts
         pac::NVIC::unpend(hal::pac::Interrupt::TIM2);
-        pac::NVIC::unpend(hal::pac::Interrupt::EXTI15_10);
+        pac::NVIC::unpend(btn_int_num);
         unsafe {
-            pac::NVIC::unmask(hal::pac::Interrupt::EXTI15_10);
+            pac::NVIC::unmask(btn_int_num);
         };
 
-        let mut delay = Delay::new(cp.SYST, &clocks);
+        let mut delay = Timer::syst(cp.SYST, &clocks).delay();
 
         loop {
             let elapsed = free(|cs| ELAPSED_MS.borrow(cs).get());
@@ -156,7 +156,7 @@ fn main() -> ! {
 fn TIM2() {
     free(|cs| {
         if let Some(ref mut tim2) = TIMER_TIM2.borrow(cs).borrow_mut().deref_mut() {
-            tim2.clear_interrupt(Event::TimeOut);
+            tim2.clear_interrupt(Event::Update);
         }
 
         let cell = ELAPSED_MS.borrow(cs);
@@ -194,10 +194,10 @@ fn EXTI15_10() {
 
 fn setup_clocks(rcc: Rcc) -> Clocks {
     rcc.cfgr
-        .hclk(48.mhz())
-        .sysclk(48.mhz())
-        .pclk1(24.mhz())
-        .pclk2(24.mhz())
+        .hclk(48.MHz())
+        .sysclk(48.MHz())
+        .pclk1(24.MHz())
+        .pclk2(24.MHz())
         .freeze()
 }
 

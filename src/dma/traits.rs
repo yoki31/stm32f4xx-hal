@@ -16,6 +16,9 @@ pub(crate) mod sealed {
 }
 use sealed::{Bits, Sealed};
 
+/// Marker trait for structs which can be safely accessed with shared reference
+pub trait SafePeripheralRead {}
+
 /// Trait for DMA stream interrupt handling.
 pub trait StreamISR: Sealed {
     /// Clear all interrupts for the DMA stream.
@@ -288,14 +291,14 @@ pub trait Channel {}
 /// # Safety
 ///
 /// Memory corruption might occur if this trait is implemented for an invalid combination.
-pub unsafe trait DMASet<STREAM, DIRECTION, const CHANNEL: u8> {}
+pub unsafe trait DMASet<STREAM, const CHANNEL: u8, DIRECTION> {}
 
 tim_channels!(CCR1, CCR2, CCR3, CCR4, DMAR, ARR);
 
 macro_rules! dma_map {
     ($(($Stream:ty, $C:literal, $Peripheral:ty, $Dir:ty)),+ $(,)*) => {
         $(
-            unsafe impl DMASet<$Stream, $Dir, $C> for $Peripheral {}
+            unsafe impl DMASet<$Stream, $C, $Dir> for $Peripheral {}
         )+
     };
 }
@@ -754,8 +757,11 @@ dma_map!(
     (Stream7<DMA2>, 7, DMAR<pac::TIM8>, MemoryToPeripheral), //TIM8_COM/TRIG
     (Stream7<DMA2>, 7, DMAR<pac::TIM8>, PeripheralToMemory), //TIM8_COM/TRIG
     (Stream1<DMA1>, 4, pac::USART3, PeripheralToMemory),     //USART3_RX
+    (Stream1<DMA1>, 4, serial::Rx<pac::USART3>, PeripheralToMemory), //USART3_RX
     (Stream3<DMA1>, 4, pac::USART3, MemoryToPeripheral),     //USART3_TX
+    (Stream3<DMA1>, 4, serial::Tx<pac::USART3>, MemoryToPeripheral), //USART3_TX
     (Stream4<DMA1>, 7, pac::USART3, MemoryToPeripheral),     //USART3_TX:DMA_CHANNEL_7
+    (Stream4<DMA1>, 7, serial::Tx<pac::USART3>, MemoryToPeripheral), //USART3_TX:DMA_CHANNEL_7
 );
 
 #[cfg(any(
@@ -928,6 +934,10 @@ dma_map!(
     (Stream2<DMA2>, 1, pac::ADC2, PeripheralToMemory),  //ADC2
     (Stream3<DMA2>, 1, pac::ADC2, PeripheralToMemory),  //ADC2
     (Stream7<DMA2>, 1, pac::DCMI, PeripheralToMemory),  //DCMI
+    (Stream2<DMA2>, 1, Adc<pac::ADC3>, PeripheralToMemory), //ADC2
+    (Stream3<DMA2>, 1, Adc<pac::ADC3>, PeripheralToMemory), //ADC2
+    (Stream0<DMA2>, 2, Adc<pac::ADC3>, PeripheralToMemory), //ADC3
+    (Stream1<DMA2>, 2, Adc<pac::ADC3>, PeripheralToMemory), //ADC3
 );
 #[cfg(any(
     feature = "stm32f417",

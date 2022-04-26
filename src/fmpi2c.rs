@@ -1,17 +1,20 @@
 use core::ops::Deref;
-use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
 
-use crate::gpio::{Const, OpenDrain, PinA, SetAlternate};
-use crate::i2c::{Error, Scl, Sda};
+use crate::i2c::{Error, NoAcknowledgeSource, Pins};
 use crate::pac::{fmpi2c1, FMPI2C1, RCC};
 use crate::rcc::{Enable, Reset};
-use crate::time::{Hertz, U32Ext};
+use fugit::{HertzU32 as Hertz, RateExtU32};
+
+mod hal_02;
+mod hal_1;
 
 /// I2C FastMode+ abstraction
 pub struct FMPI2c<I2C, PINS> {
     i2c: I2C,
     pins: PINS,
 }
+
+pub type FMPI2c1<PINS> = FMPI2c<FMPI2C1, PINS>;
 
 #[derive(Debug, PartialEq)]
 pub enum FmpMode {
@@ -21,22 +24,18 @@ pub enum FmpMode {
 }
 
 impl FmpMode {
-    pub fn standard<F: Into<Hertz>>(frequency: F) -> Self {
+    pub fn standard(frequency: Hertz) -> Self {
         Self::Standard {
             frequency: frequency.into(),
         }
     }
 
-    pub fn fast<F: Into<Hertz>>(frequency: F) -> Self {
-        Self::Fast {
-            frequency: frequency.into(),
-        }
+    pub fn fast(frequency: Hertz) -> Self {
+        Self::Fast { frequency }
     }
 
-    pub fn fast_plus<F: Into<Hertz>>(frequency: F) -> Self {
-        Self::FastPlus {
-            frequency: frequency.into(),
-        }
+    pub fn fast_plus(frequency: Hertz) -> Self {
+        Self::FastPlus { frequency }
     }
 
     pub fn get_frequency(&self) -> Hertz {
@@ -48,15 +47,13 @@ impl FmpMode {
     }
 }
 
-impl<F> From<F> for FmpMode
-where
-    F: Into<Hertz>,
-{
-    fn from(frequency: F) -> Self {
-        let frequency: Hertz = frequency.into();
-        if frequency <= 100_000.hz() {
+impl From<Hertz> for FmpMode {
+    fn from(frequency: Hertz) -> Self {
+        let k100: Hertz = 100.kHz();
+        let k400: Hertz = 400.kHz();
+        if frequency <= k100 {
             Self::Standard { frequency }
-        } else if frequency <= 400_000.hz() {
+        } else if frequency <= k400 {
             Self::Fast { frequency }
         } else {
             Self::FastPlus { frequency }
@@ -64,12 +61,11 @@ where
     }
 }
 
-impl<SCL, SDA, const SCLA: u8, const SDAA: u8> FMPI2c<FMPI2C1, (SCL, SDA)>
+impl<PINS> FMPI2c<FMPI2C1, PINS>
 where
-    SCL: PinA<Scl, FMPI2C1, A = Const<SCLA>> + SetAlternate<OpenDrain, SCLA>,
-    SDA: PinA<Sda, FMPI2C1, A = Const<SDAA>> + SetAlternate<OpenDrain, SDAA>,
+    PINS: Pins<FMPI2C1>,
 {
-    pub fn new<M: Into<FmpMode>>(i2c: FMPI2C1, mut pins: (SCL, SDA), mode: M) -> Self {
+    pub fn new<M: Into<FmpMode>>(i2c: FMPI2C1, mut pins: PINS, mode: M) -> Self {
         unsafe {
             // NOTE(unsafe) this reference will only be used for atomic writes with no side effects.
             let rcc = &(*RCC::ptr());
@@ -81,17 +77,15 @@ where
             rcc.dckcfgr2.modify(|_, w| w.fmpi2c1sel().hsi());
         }
 
-        pins.0.set_alt_mode();
-        pins.1.set_alt_mode();
+        pins.set_alt_mode();
 
         let i2c = FMPI2c { i2c, pins };
         i2c.i2c_init(mode);
         i2c
     }
 
-    pub fn release(mut self) -> (FMPI2C1, (SCL, SDA)) {
-        self.pins.0.restore_mode();
-        self.pins.1.restore_mode();
+    pub fn release(mut self) -> (FMPI2C1, PINS) {
+        self.pins.restore_mode();
 
         (self.i2c, self.pins)
     }
@@ -123,21 +117,21 @@ where
         match mode {
             FmpMode::Standard { frequency } => {
                 presc = 3;
-                scll = cmp::max((((FREQ >> presc) >> 1) / frequency.0) - 1, 255) as u8;
+                scll = cmp::max((((FREQ >> presc) >> 1) / frequency.raw()) - 1, 255) as u8;
                 sclh = scll - 4;
                 sdadel = 2;
                 scldel = 4;
             }
             FmpMode::Fast { frequency } => {
                 presc = 1;
-                scll = cmp::max((((FREQ >> presc) >> 1) / frequency.0) - 1, 255) as u8;
+                scll = cmp::max((((FREQ >> presc) >> 1) / frequency.raw()) - 1, 255) as u8;
                 sclh = scll - 6;
                 sdadel = 2;
                 scldel = 3;
             }
             FmpMode::FastPlus { frequency } => {
                 presc = 0;
-                scll = cmp::max((((FREQ >> presc) >> 1) / frequency.0) - 4, 255) as u8;
+                scll = cmp::max((((FREQ >> presc) >> 1) / frequency.raw()) - 4, 255) as u8;
                 sclh = scll - 2;
                 sdadel = 0;
                 scldel = 2;
@@ -168,9 +162,16 @@ where
             self.i2c
                 .icr
                 .write(|w| w.stopcf().set_bit().nackcf().set_bit());
-            return Err(Error::NACK);
+            return Err(Error::NoAcknowledge(NoAcknowledgeSource::Unknown));
         }
 
+        Ok(())
+    }
+
+    fn end_transaction(&self) -> Result<(), Error> {
+        // Check and clear flags if they somehow ended up set
+        self.check_and_clear_error_flags(&self.i2c.isr.read())
+            .map_err(Error::nack_data)?;
         Ok(())
     }
 
@@ -178,36 +179,79 @@ where
         // Wait until we're ready for sending
         while {
             let isr = self.i2c.isr.read();
-            self.check_and_clear_error_flags(&isr)?;
+            self.check_and_clear_error_flags(&isr)
+                .map_err(Error::nack_addr)?;
             isr.txis().bit_is_clear()
         } {}
 
         // Push out a byte of data
         self.i2c.txdr.write(|w| unsafe { w.bits(u32::from(byte)) });
 
-        self.check_and_clear_error_flags(&self.i2c.isr.read())?;
-        Ok(())
+        self.end_transaction()
     }
 
     fn recv_byte(&self) -> Result<u8, Error> {
         while {
             let isr = self.i2c.isr.read();
-            self.check_and_clear_error_flags(&isr)?;
+            self.check_and_clear_error_flags(&isr)
+                .map_err(Error::nack_data)?;
             isr.rxne().bit_is_clear()
         } {}
 
         let value = self.i2c.rxdr.read().bits() as u8;
         Ok(value)
     }
-}
 
-impl<I2C, PINS> WriteRead for FMPI2c<I2C, PINS>
-where
-    I2C: Deref<Target = fmpi2c1::RegisterBlock>,
-{
-    type Error = Error;
+    pub fn read(&mut self, addr: u8, buffer: &mut [u8]) -> Result<(), Error> {
+        // Set up current address for reading
+        self.i2c.cr2.modify(|_, w| {
+            w.sadd()
+                .bits(u16::from(addr) << 1)
+                .nbytes()
+                .bits(buffer.len() as u8)
+                .rd_wrn()
+                .set_bit()
+        });
 
-    fn write_read(&mut self, addr: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
+        // Send a START condition
+        self.i2c.cr2.modify(|_, w| w.start().set_bit());
+
+        // Send the autoend after setting the start to get a restart
+        self.i2c.cr2.modify(|_, w| w.autoend().set_bit());
+
+        // Now read in all bytes
+        for c in buffer.iter_mut() {
+            *c = self.recv_byte()?;
+        }
+
+        self.end_transaction()
+    }
+
+    pub fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
+        // Set up current slave address for writing and enable autoending
+        self.i2c.cr2.modify(|_, w| {
+            w.sadd()
+                .bits(u16::from(addr) << 1)
+                .nbytes()
+                .bits(bytes.len() as u8)
+                .rd_wrn()
+                .clear_bit()
+                .autoend()
+                .set_bit()
+        });
+
+        // Send a START condition
+        self.i2c.cr2.modify(|_, w| w.start().set_bit());
+
+        // Send out all individual bytes
+        for c in bytes {
+            self.send_byte(*c)?;
+        }
+
+        self.end_transaction()
+    }
+
+    pub fn write_read(&mut self, addr: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
         // Set up current slave address for writing and disable autoending
         self.i2c.cr2.modify(|_, w| {
             w.sadd()
@@ -226,7 +270,8 @@ where
         // Wait until the transmit buffer is empty and there hasn't been any error condition
         while {
             let isr = self.i2c.isr.read();
-            self.check_and_clear_error_flags(&isr)?;
+            self.check_and_clear_error_flags(&isr)
+                .map_err(Error::nack_addr)?;
             isr.txis().bit_is_clear() && isr.tc().bit_is_clear()
         } {}
 
@@ -238,7 +283,8 @@ where
         // Wait until data was sent
         while {
             let isr = self.i2c.isr.read();
-            self.check_and_clear_error_flags(&isr)?;
+            self.check_and_clear_error_flags(&isr)
+                .map_err(Error::nack_data)?;
             isr.tc().bit_is_clear()
         } {}
 
@@ -263,78 +309,6 @@ where
             *c = self.recv_byte()?;
         }
 
-        // Check and clear flags if they somehow ended up set
-        self.check_and_clear_error_flags(&self.i2c.isr.read())?;
-
-        Ok(())
-    }
-}
-
-impl<I2C, PINS> Read for FMPI2c<I2C, PINS>
-where
-    I2C: Deref<Target = fmpi2c1::RegisterBlock>,
-{
-    type Error = Error;
-
-    fn read(&mut self, addr: u8, buffer: &mut [u8]) -> Result<(), Error> {
-        // Set up current address for reading
-        self.i2c.cr2.modify(|_, w| {
-            w.sadd()
-                .bits(u16::from(addr) << 1)
-                .nbytes()
-                .bits(buffer.len() as u8)
-                .rd_wrn()
-                .set_bit()
-        });
-
-        // Send a START condition
-        self.i2c.cr2.modify(|_, w| w.start().set_bit());
-
-        // Send the autoend after setting the start to get a restart
-        self.i2c.cr2.modify(|_, w| w.autoend().set_bit());
-
-        // Now read in all bytes
-        for c in buffer.iter_mut() {
-            *c = self.recv_byte()?;
-        }
-
-        // Check and clear flags if they somehow ended up set
-        self.check_and_clear_error_flags(&self.i2c.isr.read())?;
-
-        Ok(())
-    }
-}
-
-impl<I2C, PINS> Write for FMPI2c<I2C, PINS>
-where
-    I2C: Deref<Target = fmpi2c1::RegisterBlock>,
-{
-    type Error = Error;
-
-    fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
-        // Set up current slave address for writing and enable autoending
-        self.i2c.cr2.modify(|_, w| {
-            w.sadd()
-                .bits(u16::from(addr) << 1)
-                .nbytes()
-                .bits(bytes.len() as u8)
-                .rd_wrn()
-                .clear_bit()
-                .autoend()
-                .set_bit()
-        });
-
-        // Send a START condition
-        self.i2c.cr2.modify(|_, w| w.start().set_bit());
-
-        // Send out all individual bytes
-        for c in bytes {
-            self.send_byte(*c)?;
-        }
-
-        // Check and clear flags if they somehow ended up set
-        self.check_and_clear_error_flags(&self.i2c.isr.read())?;
-
-        Ok(())
+        self.end_transaction()
     }
 }

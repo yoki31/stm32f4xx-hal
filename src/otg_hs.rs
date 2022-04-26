@@ -8,12 +8,9 @@
 
 use crate::pac;
 
-use crate::gpio::{
-    gpiob::{PB14, PB15},
-    Alternate, PushPull,
-};
+use crate::gpio::{Alternate, PushPull, PB14, PB15};
 use crate::rcc::{Enable, Reset};
-use crate::time::Hertz;
+use fugit::HertzU32 as Hertz;
 
 pub use synopsys_usb_otg::UsbBus;
 use synopsys_usb_otg::UsbPeripheral;
@@ -22,8 +19,8 @@ pub struct USB {
     pub usb_global: pac::OTG_HS_GLOBAL,
     pub usb_device: pac::OTG_HS_DEVICE,
     pub usb_pwrclk: pac::OTG_HS_PWRCLK,
-    pub pin_dm: PB14<Alternate<PushPull, 12>>,
-    pub pin_dp: PB15<Alternate<PushPull, 12>>,
+    pub pin_dm: PB14<Alternate<12, PushPull>>,
+    pub pin_dp: PB15<Alternate<12, PushPull>>,
     pub hclk: Hertz,
 }
 

@@ -7,28 +7,195 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Pin::with_mode` [#489]
+
+### Changed
+
+- `Spi` can be operated as `Slave` [#487]
+
+[#487]: https://github.com/stm32-rs/stm32f4xx-hal/pull/487
+[#489]: https://github.com/stm32-rs/stm32f4xx-hal/pull/489
+
+## [v0.13.1] - 2022-04-20
+
+### Fixed
+
+- Fix `embedded_hal 1.0-alpha.7` version, public `PinMode`, update deps [#485]
+- Remove the defmt feature/dependency name workaround [#479]
+
+[#479]: https://github.com/stm32-rs/stm32f4xx-hal/pull/479
+[#485]: https://github.com/stm32-rs/stm32f4xx-hal/pull/485
+
+## [v0.13.0] - 2022-04-04
+
+### Changed
+
+- `DmaSet` & `Transfer` take channel after stream generic, then other [#477]
+- Depracate "rt" feature as enabled by-default in `pac` [#476]
+- Add `Pin::interrupt()` helper method [#476]
+- Add restriction for setting pins in alternate mode (`IntoAF`), add docs [#474]
+- Explicit order for PINS, more smart aliases for peripherals [#472]
+- Add `AFn` type aliases for `Alternate<n>` [#471]
+- CI updates + cache [#468]
+- Add missing `embedded-hal 1.0` for `DynamicPin` [#470]
+- Remove pull resistor from `Input` mode, use `Pull` enum instead, add universal `into_mode` pin converter [#467]
+- Move pin mode at the end of generics, add defaults for modes,
+  bump MSRV to 1.59 [#418]
+- Move hd44780-driver to dev-dependencies [#465]
+
+### Fixed
+- Fixed RCC example [#473]
+- Enable the defmt feature on fugit when the defmt feature on the
+  crate is enabled [#465]
+
 ### Added
 
+- Support eMMC peripherals using SDIO module [#458]
+- `defmt::Format` derive on enums behind `defmt` feature [#460]
+- SPI transactional impl [#464]
+
+[#418]: https://github.com/stm32-rs/stm32f4xx-hal/pull/418
+[#458]: https://github.com/stm32-rs/stm32f4xx-hal/pull/458
+[#460]: https://github.com/stm32-rs/stm32f4xx-hal/pull/460
+[#464]: https://github.com/stm32-rs/stm32f4xx-hal/pull/464
+[#465]: https://github.com/stm32-rs/stm32f4xx-hal/pull/465
+[#467]: https://github.com/stm32-rs/stm32f4xx-hal/pull/467
+[#468]: https://github.com/stm32-rs/stm32f4xx-hal/pull/468
+[#470]: https://github.com/stm32-rs/stm32f4xx-hal/pull/470
+[#471]: https://github.com/stm32-rs/stm32f4xx-hal/pull/471
+[#472]: https://github.com/stm32-rs/stm32f4xx-hal/pull/472
+[#473]: https://github.com/stm32-rs/stm32f4xx-hal/pull/473
+[#474]: https://github.com/stm32-rs/stm32f4xx-hal/pull/474
+[#476]: https://github.com/stm32-rs/stm32f4xx-hal/pull/476
+[#477]: https://github.com/stm32-rs/stm32f4xx-hal/pull/477
+
+## [v0.12.0] - 2022-02-23
+
+### Changed
+
+- Make `Monotonic` implementation generic for `u32` timers, fix `PwmExt` trait [#454]
+- Rename `Delay<SYST>` to SysDelay, remove old `Delay<TIM2>`
+- Extend timers to 32bit on `Delay`
+- Move `MonoTimer` from `timer` to dwt mode [#448]
+- Unify serial trait impls for embedded-hal 0.2 & 1.0 [#447]
+- Add possibility to select Timer master mode
+- Add inherent impl of `embedded_hal::Pwm` methods on `Pwm`s [#439]
+- Use `embedded-dma` v0.2 [#440]
+- Add LSI support for `Rtc` [#438]
+- Use `time` for `Rtc` instead of `rtcc`, add `rtc` example [#436]
+- Move `i2c` `embedded-hal` trait impls to `I2c` methods [#431]
+- Reexport pins in `gpio` module
+- Pwm channels now constants [#432]
+- Use fugit rate types instead of custom [#430]
+- Add channel events, make Event use bitflags (simplify interrupt handling) [#425]
+- reexport `digital::v2::PinState` again [#428]
+- Timer impls with time based on `fugit::Duration` same as `Hertz` moved to `timer` module,
+  added appropriate `Ext` traits implemented on peripherals directly,
+  added `Pwm` and `fugit-timer` impls [#423] [#449]
+
+### Fixed
+
+- Incorrect values of autoreload in `CountDown::start`, `Pwm::new`, `Delay` and prescaler in `Delay` [#422]
+
+### Added
+
+- Missing `DelayMs<u8>` / `DelayUs<u8>` impls for fugit::Delay
+- Support of embedded-hal 1.0.0-alpha.7 [#443]
+- `hd44780` example [#441]
+- Aliases for peripheral wrappers [#434]
+- `WithPwm` trait implemented for timers with channels (internals) [#425]
+- `Pwm` struct with `split` method and implementation of embedded-hal::Pwm (similar to f1xx-hal) [#425]
+- VSCode setting file
+- Add CAN1 PB8/PB9 and SPI3 MOSI PC1 pin mappings for F446 [#421]
+- Add embedded-storage traits for flash [#429]
+- `Debug` & `defmt::Format` impls for some structures and enums [#385]
+
+[#385]: https://github.com/stm32-rs/stm32f4xx-hal/pull/385
+[#421]: https://github.com/stm32-rs/stm32f4xx-hal/pull/421
+[#422]: https://github.com/stm32-rs/stm32f4xx-hal/pull/422
+[#423]: https://github.com/stm32-rs/stm32f4xx-hal/pull/423
+[#425]: https://github.com/stm32-rs/stm32f4xx-hal/pull/425
+[#428]: https://github.com/stm32-rs/stm32f4xx-hal/pull/428
+[#429]: https://github.com/stm32-rs/stm32f4xx-hal/pull/429
+[#431]: https://github.com/stm32-rs/stm32f4xx-hal/pull/431
+[#432]: https://github.com/stm32-rs/stm32f4xx-hal/pull/432
+[#434]: https://github.com/stm32-rs/stm32f4xx-hal/pull/434
+[#436]: https://github.com/stm32-rs/stm32f4xx-hal/pull/436
+[#438]: https://github.com/stm32-rs/stm32f4xx-hal/pull/438
+[#439]: https://github.com/stm32-rs/stm32f4xx-hal/pull/439
+[#440]: https://github.com/stm32-rs/stm32f4xx-hal/pull/440
+[#443]: https://github.com/stm32-rs/stm32f4xx-hal/pull/443
+[#441]: https://github.com/stm32-rs/stm32f4xx-hal/pull/441
+[#430]: https://github.com/stm32-rs/stm32f4xx-hal/pull/430
+[#447]: https://github.com/stm32-rs/stm32f4xx-hal/pull/447
+[#448]: https://github.com/stm32-rs/stm32f4xx-hal/pull/448
+[#449]: https://github.com/stm32-rs/stm32f4xx-hal/pull/449
+[#454]: https://github.com/stm32-rs/stm32f4xx-hal/pull/454
+
+### Changed
+
+- Fix Width of TIM5 F410 [#409]
+- up `cortex-m` to 0.7.4, use `cycle_count` instead of `get_cycle_count` on DWT [#415]
+
+[#409]: https://github.com/stm32-rs/stm32f4xx-hal/pull/409
+[#415]: https://github.com/stm32-rs/stm32f4xx-hal/pull/415
+
+## [v0.11.1] - 2021-12-30
+
+- Remove optional `atat` dependency [#408]
+
+[#408]: https://github.com/stm32-rs/stm32f4xx-hal/pull/408
+
+## [v0.11.0] - 2021-12-29
+
+### Added
+
+- Added `Counter` with `CountDown<Time=fugit::TimerDuration>` and `atat::Clock` implementations [#381]
 - `Into<serial::Config>` for `Bps` [#387]
+- Added the missing DMA implementations for USART3 [#373]
+- `DynamicPin` with dynamically changed mode, remove `AF` constants [#372]
 - `count_down` constructor for `Timer` -> `CountDownTimer` without start [#382]
 - Implementation of RTIC Monotonic for TIM2 & TIM5 under `rtic` feature [#380] [#390]
 - `IoPin` for `Output<OpenDrain>> <-> Input<Floating>>` [#374]
 - `IoPin` for `Output<PushPull>> <-> Input<PullUp>> and Input<PullDown>>` [#389]
+- Add `internal_pull_down` to `Pin<Output<OpenDrain>>` and `Pin<Alternate<PushPull>>` for symmetry
+  with `internal_pull_up` [#399]
+- Added `peripheral` for DMA read access to peripheral [#396]
+- Added ADC2+ADC3 implementations to DMA Transfer [#396]
+- Added `reference_voltage` to Adc [#396]
 
-[#390]: https://github.com/stm32-rs/stm32f4xx-hal/pull/390
-[#382]: https://github.com/stm32-rs/stm32f4xx-hal/pull/382
-[#380]: https://github.com/stm32-rs/stm32f4xx-hal/pull/380
+[#372]: https://github.com/stm32-rs/stm32f4xx-hal/pull/372
+[#373]: https://github.com/stm32-rs/stm32f4xx-hal/pull/373
+[#396]: https://github.com/stm32-rs/stm32f4xx-hal/pull/396
 [#374]: https://github.com/stm32-rs/stm32f4xx-hal/pull/374
+[#380]: https://github.com/stm32-rs/stm32f4xx-hal/pull/380
+[#381]: https://github.com/stm32-rs/stm32f4xx-hal/pull/381
+[#382]: https://github.com/stm32-rs/stm32f4xx-hal/pull/382
+[#389]: https://github.com/stm32-rs/stm32f4xx-hal/pull/389
+[#390]: https://github.com/stm32-rs/stm32f4xx-hal/pull/390
+[#399]: https://github.com/stm32-rs/stm32f4xx-hal/pull/399
 
 ### Changed
 
+- Correct default mode for debugger pins [#405]
+- Move `embedded-hal` implementations to subdirs [#404]
+- Qei macro cleanups  [#403]
+- Update RTIC to 1.0 [#401]
+- Finish SDIO data transmission before querying card status in `write_block` [#395]
+- SDIO: Rewrite loop conditions to silence clippy
 - Unify alternate pin constraints [#393]
+- Prevent overflow when optimizing SAI PLL [#419]
 - [breaking-change] Use `&Clocks` instead of `Clocks` [#387]
 - Split and rename `GetBusFreq` -> `BusClock`, `BusTimerClock` [#386]
 - [breaking-change] Remove `Can::new_unchecked`. Add `Can::tx` and `Can::rx` [#384]
 - [breaking-change] Make `Alternate` generic over `Otype` instead of separate `Alternate` and `AlternateOD` [#383]
 - [breaking-change] Bump `stm32f4` to 0.14. Update RTIC based examples to use `rtic` 0.6 [#367]
 - [breaking-change] Bump `bxcan` to 0.6 [#371]
+- fix #362: ADC voltage conversion might be incorrect [#397]
+- [breaking-change] Change `Pin<Output<OpenDrain>>::internal_pull_up` signature from `(&mut self, _: bool) -> ()`
+  to `(self, _: bool) -> Self`. [#399]
 
 [#367]: https://github.com/stm32-rs/stm32f4xx-hal/pull/367
 [#371]: https://github.com/stm32-rs/stm32f4xx-hal/pull/371
@@ -37,6 +204,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 [#386]: https://github.com/stm32-rs/stm32f4xx-hal/pull/386
 [#387]: https://github.com/stm32-rs/stm32f4xx-hal/pull/387
 [#393]: https://github.com/stm32-rs/stm32f4xx-hal/pull/393
+[#395]: https://github.com/stm32-rs/stm32f4xx-hal/pull/395
+[#397]: https://github.com/stm32-rs/stm32f4xx-hal/pull/397
+[#401]: https://github.com/stm32-rs/stm32f4xx-hal/pull/401
+[#403]: https://github.com/stm32-rs/stm32f4xx-hal/pull/403
+[#404]: https://github.com/stm32-rs/stm32f4xx-hal/pull/404
+[#405]: https://github.com/stm32-rs/stm32f4xx-hal/pull/405
+[#419]: https://github.com/stm32-rs/stm32f4xx-hal/pull/419
 
 ## [v0.10.1] - 2021-10-26
 
@@ -90,7 +264,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Added DMA support for SPI [#319]
 
 [#265]: https://github.com/stm32-rs/stm32f4xx-hal/pull/265
-[#265]: https://github.com/stm32-rs/stm32f4xx-hal/pull/266
+[#266]: https://github.com/stm32-rs/stm32f4xx-hal/pull/266
 [#271]: https://github.com/stm32-rs/stm32f4xx-hal/pull/271
 [#295]: https://github.com/stm32-rs/stm32f4xx-hal/pull/295
 [#297]: https://github.com/stm32-rs/stm32f4xx-hal/pull/297
@@ -491,7 +665,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Support for stm32f407 and stm32f429.
 
-[Unreleased]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.13.1...HEAD
+[v0.13.1]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.13.0...v0.13.1
+[v0.13.0]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.12.0...v0.13.0
+[v0.12.0]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.11.1...v0.12.0
+[v0.11.1]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.11.0...v0.11.1
+[v0.11.0]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.10.1...v0.11.0
 [v0.10.1]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.10.0...v0.10.1
 [v0.10.0]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.9.0...v0.10.0
 [v0.9.0]: https://github.com/stm32-rs/stm32f4xx-hal/compare/v0.8.3...v0.9.0

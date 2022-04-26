@@ -48,20 +48,15 @@ use cortex_m_rt::entry;
 use stm32_i2s_v12x::format::{Data16Frame16, FrameFormat};
 use stm32_i2s_v12x::{MasterClock, MasterConfig, Polarity, TransmitMode};
 
-use stm32f4xx_hal::delay::Delay;
 use stm32f4xx_hal::dma::config::DmaConfig;
 use stm32f4xx_hal::dma::MemoryToPeripheral;
 use stm32f4xx_hal::dma::{Stream5, StreamsTuple, Transfer};
-use stm32f4xx_hal::gpio::{
-    gpioa::PA4,
-    gpioc::{PC10, PC12, PC7},
-    Alternate, PushPull,
-};
+use stm32f4xx_hal::gpio::{AF6, PA4, PC10, PC12, PC7};
 use stm32f4xx_hal::i2c::I2c;
-use stm32f4xx_hal::i2s::I2s;
+use stm32f4xx_hal::i2s::I2s3;
+use stm32f4xx_hal::pac::DMA1;
 use stm32f4xx_hal::pac::{interrupt, Interrupt};
 use stm32f4xx_hal::pac::{CorePeripherals, Peripherals};
-use stm32f4xx_hal::pac::{DMA1, SPI3};
 use stm32f4xx_hal::prelude::*;
 
 use cs43l22::{Cs43L22, Register};
@@ -97,14 +92,14 @@ fn main() -> ! {
 
     let rcc = dp.RCC.constrain();
     // The 86 MHz frequency can be divided to get a sample rate very close to 48 kHz.
-    let clocks = rcc.cfgr.use_hse(8.mhz()).i2s_clk(86.mhz()).freeze();
+    let clocks = rcc.cfgr.use_hse(8.MHz()).i2s_clk(86.MHz()).freeze();
 
     let gpioa = dp.GPIOA.split();
     let gpiob = dp.GPIOB.split();
     let gpioc = dp.GPIOC.split();
     let gpiod = dp.GPIOD.split();
 
-    let mut delay = Delay::new(cp.SYST, &clocks);
+    let mut delay = cp.SYST.delay(&clocks);
 
     let i2c = I2c::new(
         dp.I2C1,
@@ -112,7 +107,7 @@ fn main() -> ! {
             gpiob.pb6.into_alternate_open_drain(),
             gpiob.pb9.into_alternate_open_drain(),
         ),
-        100.khz(),
+        100.kHz(),
         &clocks,
     );
     // Shift the address to deal with different ways of representing I2C addresses
@@ -127,7 +122,9 @@ fn main() -> ! {
         gpioc.pc7.into_alternate(),
         gpioc.pc12.into_alternate(),
     );
-    let hal_i2s = I2s::new(dp.SPI3, i2s_pins, &clocks);
+    // let hal_i2s = I2s::new(dp.SPI3, i2s_pins, &clocks);
+    // or
+    let hal_i2s = dp.SPI3.i2s(i2s_pins, &clocks);
     let i2s_clock = hal_i2s.input_clock();
 
     // Audio timing configuration:
@@ -138,7 +135,7 @@ fn main() -> ! {
 
     let i2s = stm32_i2s_v12x::I2s::new(hal_i2s);
     let mut i2s = i2s.configure_master_transmit(MasterConfig::with_sample_rate(
-        i2s_clock.0,
+        i2s_clock.raw(),
         sample_rate,
         Data16Frame16,
         FrameFormat::PhilipsI2s,
@@ -213,21 +210,13 @@ fn main() -> ! {
 
 type I2sDmaTransfer = Transfer<
     Stream5<DMA1>,
+    0,
     stm32_i2s_v12x::I2s<
-        I2s<
-            SPI3,
-            (
-                PA4<Alternate<PushPull, 6>>,
-                PC10<Alternate<PushPull, 6>>,
-                PC7<Alternate<PushPull, 6>>,
-                PC12<Alternate<PushPull, 6>>,
-            ),
-        >,
+        I2s3<(PA4<AF6>, PC10<AF6>, PC7<AF6>, PC12<AF6>)>,
         TransmitMode<Data16Frame16>,
     >,
     MemoryToPeripheral,
     &'static mut [u16; SINE_SAMPLES * 2],
-    0,
 >;
 
 /// DMA transfer handoff from main() to interrupt handler

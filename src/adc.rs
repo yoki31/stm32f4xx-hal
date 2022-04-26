@@ -8,11 +8,15 @@
     Temperature in °C = (110-30) * (adc_sample - VtempCal30::get().read()) / (VtempCal110::get().read()-VtempCal30::get().read()) + 30
 */
 
-use crate::dma::traits::PeriAddress;
+use crate::dma::traits::{PeriAddress, SafePeripheralRead};
 use crate::rcc::{Enable, Reset};
-use crate::{gpio::*, pac, signature::VrefCal, signature::VDDA_CALIB};
+use crate::{
+    gpio::{self, Analog},
+    pac,
+    signature::VrefCal,
+    signature::VDDA_CALIB,
+};
 use core::fmt;
-use embedded_hal::adc::{Channel, OneShot};
 
 /// Vref internal signal, used for calibration
 pub struct Vref;
@@ -26,9 +30,14 @@ pub struct Temperature;
 macro_rules! adc_pins {
     ($($pin:ty => ($adc:ident, $chan:expr)),+ $(,)*) => {
         $(
-            impl Channel<pac::$adc> for $pin {
+            impl embedded_hal::adc::Channel<pac::$adc> for $pin {
                 type ID = u8;
                 fn channel() -> u8 { $chan }
+            }
+
+            impl embedded_hal_one::adc::nb::Channel<pac::$adc> for $pin {
+                type ID = u8;
+                fn channel(&self) -> u8 { $chan }
             }
         )+
     };
@@ -37,7 +46,8 @@ macro_rules! adc_pins {
 /// Contains types related to ADC configuration
 pub mod config {
     /// The place in the sequence a given channel should be captured
-    #[derive(Debug, PartialEq, PartialOrd, Copy, Clone)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
     pub enum Sequence {
         /// 1
         One,
@@ -121,7 +131,8 @@ pub mod config {
     }
 
     /// The number of cycles to sample a given channel for
-    #[derive(Debug, PartialEq, Copy, Clone)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum SampleTime {
         /// 3 cycles
         Cycles_3,
@@ -174,7 +185,8 @@ pub mod config {
 
     /// Clock config for the ADC
     /// Check the datasheet for the maximum speed the ADC supports
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Clock {
         /// PCLK2 (APB2) divided by 2
         Pclk2_div_2,
@@ -198,7 +210,8 @@ pub mod config {
     }
 
     /// Resolution to sample at
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Resolution {
         /// 12-bit
         Twelve,
@@ -221,7 +234,8 @@ pub mod config {
     }
 
     /// Possible external triggers the ADC can listen to
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum ExternalTrigger {
         /// TIM1 compare channel 1
         Tim_1_cc_1,
@@ -274,7 +288,8 @@ pub mod config {
     }
 
     /// Possible trigger modes
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum TriggerMode {
         /// Don't listen to external trigger
         Disabled,
@@ -297,7 +312,8 @@ pub mod config {
     }
 
     /// Data register alignment
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Align {
         /// Right align output data
         Right,
@@ -314,7 +330,8 @@ pub mod config {
     }
 
     /// Scan enable/disable
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Scan {
         /// Scan mode disabled
         Disabled,
@@ -331,7 +348,8 @@ pub mod config {
     }
 
     /// Continuous mode enable/disable
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Continuous {
         /// Single mode, continuous disabled
         Single,
@@ -348,7 +366,8 @@ pub mod config {
     }
 
     /// DMA mode
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Dma {
         /// No DMA, disabled
         Disabled,
@@ -359,7 +378,8 @@ pub mod config {
     }
 
     /// End-of-conversion interrupt enabled/disabled
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum Eoc {
         /// End-of-conversion interrupt disabled
         Disabled,
@@ -372,7 +392,8 @@ pub mod config {
     /// Configuration for the adc.
     /// There are some additional parameters on the adc peripheral that can be
     /// added here when needed but this covers several basic usecases.
-    #[derive(Debug, Clone, Copy)]
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub struct AdcConfig {
         pub(crate) clock: Clock,
         pub(crate) resolution: Resolution,
@@ -605,7 +626,7 @@ pub struct Adc<ADC> {
     adc_reg: ADC,
     /// VDDA in millivolts calculated from the factory calibration and vrefint
     calibrated_vdda: u32,
-    /// Maximum sample value possible for the configured resolution
+    /// Exclusive limit for the sample value possible for the configured resolution.
     max_sample: u32,
 }
 impl<ADC> fmt::Debug for Adc<ADC> {
@@ -691,6 +712,8 @@ macro_rules! adc {
 
     ($($adc_type:ident => ($constructor_fn_name:ident, $common_type:ident, $en_bit: expr)),+ $(,)*) => {
         $(
+            impl SafePeripheralRead for Adc<pac::$adc_type> { }
+
             impl Adc<pac::$adc_type> {
 
                 adc!(additionals: $adc_type => ($common_type));
@@ -794,10 +817,10 @@ macro_rules! adc {
                 /// Sets the sampling resolution
                 pub fn set_resolution(&mut self, resolution: config::Resolution) {
                     self.max_sample = match resolution {
-                        config::Resolution::Twelve => (1 << 12) - 1,
-                        config::Resolution::Ten => (1 << 10) - 1,
-                        config::Resolution::Eight => (1 << 8) - 1,
-                        config::Resolution::Six => (1 << 6) -1,
+                        config::Resolution::Twelve => (1 << 12),
+                        config::Resolution::Ten => (1 << 10),
+                        config::Resolution::Eight => (1 << 8),
+                        config::Resolution::Six => (1 << 6),
                     };
                     self.config.resolution = resolution;
                     self.adc_reg.cr1.modify(|_, w| w.res().bits(resolution.into()));
@@ -897,7 +920,7 @@ macro_rules! adc {
                 /// to sample for at a given ADC clock frequency
                 pub fn configure_channel<CHANNEL>(&mut self, _channel: &CHANNEL, sequence: config::Sequence, sample_time: config::SampleTime)
                 where
-                    CHANNEL: Channel<pac::$adc_type, ID=u8>
+                    CHANNEL: embedded_hal::adc::Channel<pac::$adc_type, ID=u8>
                 {
                     //Check the sequence is long enough
                     self.adc_reg.sqr1.modify(|r, w| {
@@ -954,9 +977,25 @@ macro_rules! adc {
                     self.adc_reg.dr.read().data().bits()
                 }
 
-                /// Converts a sample value to millivolts using calibrated VDDA and configured resolution
+                /// Converts a sample value to millivolts using calibrated VDDA and configured resolution.
+                /// Due to the ADC characteristics VDDA will never be reached as described in #362 and
+                /// [AN2834-How to get the best ADC accuracy in STM32 microcontrollers](https://www.st.com/resource/en/application_note/cd00211314-how-to-get-the-best-adc-accuracy-in-stm32-microcontrollers-stmicroelectronics.pdf) in section 3.1.2.
                 pub fn sample_to_millivolts(&self, sample: u16) -> u16 {
                     ((u32::from(sample) * self.calibrated_vdda) / self.max_sample) as u16
+                }
+
+                /// Make a converter for samples to millivolts
+                pub fn make_sample_to_millivolts(&self) -> impl Fn(u16)->u16 {
+                    let calibrated_vdda= self.calibrated_vdda;
+                    let max_sample=self.max_sample;
+                    move |sample| {
+                     ((u32::from(sample) * calibrated_vdda) / max_sample) as u16
+                    }
+                }
+
+                /// Returns the VDDA in millivolts calculated from the factory calibration and vrefint. Can be used to get calibration data from ADC1 and use it to configure ADCs that don't support calibration.
+                pub fn reference_voltage(&self) -> u32 {
+                    self.calibrated_vdda
                 }
 
                 /// Block until the conversion is completed
@@ -975,7 +1014,7 @@ macro_rules! adc {
                 /// Note that it reconfigures the adc sequence and doesn't restore it
                 pub fn convert<PIN>(&mut self, pin: &PIN, sample_time: config::SampleTime) -> u16
                 where
-                    PIN: Channel<pac::$adc_type, ID=u8>
+                    PIN: embedded_hal::adc::Channel<pac::$adc_type, ID=u8>
                 {
                     self.adc_reg.cr2.modify(|_, w| w
                         .dma().clear_bit() //Disable dma
@@ -1006,13 +1045,10 @@ macro_rules! adc {
                 }
             }
 
-            impl<PIN> OneShot<pac::$adc_type, u16, PIN> for Adc<pac::$adc_type>
-            where
-                PIN: Channel<pac::$adc_type, ID=u8>,
-            {
-                type Error = ();
-
-                fn read(&mut self, pin: &mut PIN) -> nb::Result<u16, Self::Error> {
+            impl Adc<pac::$adc_type> {
+                fn read<PIN>(&mut self, pin: &mut PIN) -> nb::Result<u16, ()>
+                    where PIN: embedded_hal::adc::Channel<pac::$adc_type, ID=u8>,
+                {
                     let enabled = self.is_enabled();
                     if !enabled {
                         self.enable();
@@ -1025,6 +1061,28 @@ macro_rules! adc {
                     }
 
                     Ok(sample)
+                }
+            }
+
+            impl<PIN> embedded_hal::adc::OneShot<pac::$adc_type, u16, PIN> for Adc<pac::$adc_type>
+            where
+                PIN: embedded_hal::adc::Channel<pac::$adc_type, ID=u8>,
+            {
+                type Error = ();
+
+                fn read(&mut self, pin: &mut PIN) -> nb::Result<u16, Self::Error> {
+                    self.read::<PIN>(pin)
+                }
+            }
+
+            impl<PIN> embedded_hal_one::adc::nb::OneShot<pac::$adc_type, u16, PIN> for Adc<pac::$adc_type>
+            where
+                PIN: embedded_hal::adc::Channel<pac::$adc_type, ID=u8> + embedded_hal_one::adc::nb::Channel<pac::$adc_type, ID=u8>,
+            {
+                type Error = ();
+
+                fn read(&mut self, pin: &mut PIN) -> nb::Result<u16, Self::Error> {
+                    self.read::<PIN>(pin)
                 }
             }
 
@@ -1050,16 +1108,16 @@ adc!(ADC3 => (adc3, ADC_COMMON, 10));
 
 #[cfg(feature = "stm32f401")]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1068,49 +1126,49 @@ adc_pins!(
 // Not available on C variant
 #[cfg(feature = "stm32f401")]
 adc_pins!(
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
 );
 
 #[cfg(any(feature = "stm32f405", feature = "stm32f415"))]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA0<Analog> => (ADC2, 0),
-    gpioa::PA0<Analog> => (ADC3, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA1<Analog> => (ADC2, 1),
-    gpioa::PA1<Analog> => (ADC3, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA2<Analog> => (ADC2, 2),
-    gpioa::PA2<Analog> => (ADC3, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA3<Analog> => (ADC2, 3),
-    gpioa::PA3<Analog> => (ADC3, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA4<Analog> => (ADC2, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA5<Analog> => (ADC2, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA6<Analog> => (ADC2, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpioa::PA7<Analog> => (ADC2, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB0<Analog> => (ADC2, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpiob::PB1<Analog> => (ADC2, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC0<Analog> => (ADC2, 10),
-    gpioc::PC0<Analog> => (ADC3, 10),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC2<Analog> => (ADC2, 12),
-    gpioc::PC2<Analog> => (ADC3, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC3<Analog> => (ADC2, 13),
-    gpioc::PC3<Analog> => (ADC3, 13),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA0<Analog> => (ADC2, 0),
+    gpio::PA0<Analog> => (ADC3, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA1<Analog> => (ADC2, 1),
+    gpio::PA1<Analog> => (ADC3, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA2<Analog> => (ADC2, 2),
+    gpio::PA2<Analog> => (ADC3, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA3<Analog> => (ADC2, 3),
+    gpio::PA3<Analog> => (ADC3, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA4<Analog> => (ADC2, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA5<Analog> => (ADC2, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA6<Analog> => (ADC2, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PA7<Analog> => (ADC2, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB0<Analog> => (ADC2, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PB1<Analog> => (ADC2, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC0<Analog> => (ADC2, 10),
+    gpio::PC0<Analog> => (ADC3, 10),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC2<Analog> => (ADC2, 12),
+    gpio::PC2<Analog> => (ADC3, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC3<Analog> => (ADC2, 13),
+    gpio::PC3<Analog> => (ADC3, 13),
     Temperature => (ADC1, 16),
     Temperature => (ADC2, 16),
     Temperature => (ADC3, 16),
@@ -1125,65 +1183,65 @@ adc_pins!(
 // Not available on O variant
 #[cfg(any(feature = "stm32f405", feature = "stm32f415"))]
 adc_pins!(
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC1<Analog> => (ADC2, 11),
-    gpioc::PC1<Analog> => (ADC3, 11),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC4<Analog> => (ADC2, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
-    gpioc::PC5<Analog> => (ADC2, 15),
-    gpiof::PF10<Analog> => (ADC3, 8),
-    gpiof::PF3<Analog> => (ADC3, 9),
-    gpiof::PF4<Analog> => (ADC3, 14),
-    gpiof::PF5<Analog> => (ADC3, 15),
-    gpiof::PF6<Analog> => (ADC3, 4),
-    gpiof::PF7<Analog> => (ADC3, 5),
-    gpiof::PF8<Analog> => (ADC3, 6),
-    gpiof::PF9<Analog> => (ADC3, 7),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC1<Analog> => (ADC2, 11),
+    gpio::PC1<Analog> => (ADC3, 11),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC4<Analog> => (ADC2, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
+    gpio::PC5<Analog> => (ADC2, 15),
+    gpio::PF10<Analog> => (ADC3, 8),
+    gpio::PF3<Analog> => (ADC3, 9),
+    gpio::PF4<Analog> => (ADC3, 14),
+    gpio::PF5<Analog> => (ADC3, 15),
+    gpio::PF6<Analog> => (ADC3, 4),
+    gpio::PF7<Analog> => (ADC3, 5),
+    gpio::PF8<Analog> => (ADC3, 6),
+    gpio::PF9<Analog> => (ADC3, 7),
 );
 
 #[cfg(any(feature = "stm32f407", feature = "stm32f417"))]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA0<Analog> => (ADC2, 0),
-    gpioa::PA0<Analog> => (ADC3, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA1<Analog> => (ADC2, 1),
-    gpioa::PA1<Analog> => (ADC3, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA2<Analog> => (ADC2, 2),
-    gpioa::PA2<Analog> => (ADC3, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA3<Analog> => (ADC2, 3),
-    gpioa::PA3<Analog> => (ADC3, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA4<Analog> => (ADC2, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA5<Analog> => (ADC2, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA6<Analog> => (ADC2, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpioa::PA7<Analog> => (ADC2, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB0<Analog> => (ADC2, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpiob::PB1<Analog> => (ADC2, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC0<Analog> => (ADC2, 10),
-    gpioc::PC0<Analog> => (ADC3, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC1<Analog> => (ADC2, 11),
-    gpioc::PC1<Analog> => (ADC3, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC2<Analog> => (ADC2, 12),
-    gpioc::PC2<Analog> => (ADC3, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC3<Analog> => (ADC2, 13),
-    gpioc::PC3<Analog> => (ADC3, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC4<Analog> => (ADC2, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
-    gpioc::PC5<Analog> => (ADC2, 15),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA0<Analog> => (ADC2, 0),
+    gpio::PA0<Analog> => (ADC3, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA1<Analog> => (ADC2, 1),
+    gpio::PA1<Analog> => (ADC3, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA2<Analog> => (ADC2, 2),
+    gpio::PA2<Analog> => (ADC3, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA3<Analog> => (ADC2, 3),
+    gpio::PA3<Analog> => (ADC3, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA4<Analog> => (ADC2, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA5<Analog> => (ADC2, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA6<Analog> => (ADC2, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PA7<Analog> => (ADC2, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB0<Analog> => (ADC2, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PB1<Analog> => (ADC2, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC0<Analog> => (ADC2, 10),
+    gpio::PC0<Analog> => (ADC3, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC1<Analog> => (ADC2, 11),
+    gpio::PC1<Analog> => (ADC3, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC2<Analog> => (ADC2, 12),
+    gpio::PC2<Analog> => (ADC3, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC3<Analog> => (ADC2, 13),
+    gpio::PC3<Analog> => (ADC3, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC4<Analog> => (ADC2, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
+    gpio::PC5<Analog> => (ADC2, 15),
     Temperature => (ADC1, 18),
     Temperature => (ADC2, 18),
     Temperature => (ADC3, 18),
@@ -1198,22 +1256,22 @@ adc_pins!(
 // Not available on V variant
 #[cfg(any(feature = "stm32f407", feature = "stm32f417"))]
 adc_pins!(
-    gpiof::PF10<Analog> => (ADC3, 8),
-    gpiof::PF3<Analog> => (ADC3, 9),
-    gpiof::PF4<Analog> => (ADC3, 14),
-    gpiof::PF5<Analog> => (ADC3, 15),
-    gpiof::PF6<Analog> => (ADC3, 4),
-    gpiof::PF7<Analog> => (ADC3, 5),
-    gpiof::PF8<Analog> => (ADC3, 6),
-    gpiof::PF9<Analog> => (ADC3, 7),
+    gpio::PF10<Analog> => (ADC3, 8),
+    gpio::PF3<Analog> => (ADC3, 9),
+    gpio::PF4<Analog> => (ADC3, 14),
+    gpio::PF5<Analog> => (ADC3, 15),
+    gpio::PF6<Analog> => (ADC3, 4),
+    gpio::PF7<Analog> => (ADC3, 5),
+    gpio::PF8<Analog> => (ADC3, 6),
+    gpio::PF9<Analog> => (ADC3, 7),
 );
 
 #[cfg(feature = "stm32f410")]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA5<Analog> => (ADC1, 5),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA5<Analog> => (ADC1, 5),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1222,37 +1280,37 @@ adc_pins!(
 // Not available on T variant
 #[cfg(feature = "stm32f410")]
 adc_pins!(
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
 );
 
 // Only available on R variant
 #[cfg(feature = "stm32f410")]
 adc_pins!(
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
 );
 
 #[cfg(feature = "stm32f411")]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1261,32 +1319,32 @@ adc_pins!(
 // Not available on C variant
 #[cfg(feature = "stm32f411")]
 adc_pins!(
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
 );
 
 #[cfg(feature = "stm32f412")]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1294,16 +1352,16 @@ adc_pins!(
 
 #[cfg(any(feature = "stm32f413", feature = "stm32f423"))]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1312,56 +1370,56 @@ adc_pins!(
 // Not available on C variant
 #[cfg(any(feature = "stm32f413", feature = "stm32f423"))]
 adc_pins!(
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
 );
 
 #[cfg(any(feature = "stm32f427", feature = "stm32f437"))]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA0<Analog> => (ADC2, 0),
-    gpioa::PA0<Analog> => (ADC3, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA1<Analog> => (ADC2, 1),
-    gpioa::PA1<Analog> => (ADC3, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA2<Analog> => (ADC2, 2),
-    gpioa::PA2<Analog> => (ADC3, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA3<Analog> => (ADC2, 3),
-    gpioa::PA3<Analog> => (ADC3, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA4<Analog> => (ADC2, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA5<Analog> => (ADC2, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA6<Analog> => (ADC2, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpioa::PA7<Analog> => (ADC2, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB0<Analog> => (ADC2, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpiob::PB1<Analog> => (ADC2, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC0<Analog> => (ADC2, 10),
-    gpioc::PC0<Analog> => (ADC3, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC1<Analog> => (ADC2, 11),
-    gpioc::PC1<Analog> => (ADC3, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC2<Analog> => (ADC2, 12),
-    gpioc::PC2<Analog> => (ADC3, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC3<Analog> => (ADC2, 13),
-    gpioc::PC3<Analog> => (ADC3, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC4<Analog> => (ADC2, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
-    gpioc::PC5<Analog> => (ADC2, 15),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA0<Analog> => (ADC2, 0),
+    gpio::PA0<Analog> => (ADC3, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA1<Analog> => (ADC2, 1),
+    gpio::PA1<Analog> => (ADC3, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA2<Analog> => (ADC2, 2),
+    gpio::PA2<Analog> => (ADC3, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA3<Analog> => (ADC2, 3),
+    gpio::PA3<Analog> => (ADC3, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA4<Analog> => (ADC2, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA5<Analog> => (ADC2, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA6<Analog> => (ADC2, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PA7<Analog> => (ADC2, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB0<Analog> => (ADC2, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PB1<Analog> => (ADC2, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC0<Analog> => (ADC2, 10),
+    gpio::PC0<Analog> => (ADC3, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC1<Analog> => (ADC2, 11),
+    gpio::PC1<Analog> => (ADC3, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC2<Analog> => (ADC2, 12),
+    gpio::PC2<Analog> => (ADC3, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC3<Analog> => (ADC2, 13),
+    gpio::PC3<Analog> => (ADC3, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC4<Analog> => (ADC2, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
+    gpio::PC5<Analog> => (ADC2, 15),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1370,63 +1428,63 @@ adc_pins!(
 // Not available on V variant
 #[cfg(any(feature = "stm32f427", feature = "stm32f437"))]
 adc_pins!(
-    gpiof::PF10<Analog> => (ADC3, 8),
-    gpiof::PF3<Analog> => (ADC3, 9),
-    gpiof::PF4<Analog> => (ADC3, 14),
-    gpiof::PF5<Analog> => (ADC3, 15),
+    gpio::PF10<Analog> => (ADC3, 8),
+    gpio::PF3<Analog> => (ADC3, 9),
+    gpio::PF4<Analog> => (ADC3, 14),
+    gpio::PF5<Analog> => (ADC3, 15),
 );
 
 // Only available on I and Z variants
 #[cfg(any(feature = "stm32f427", feature = "stm32f437"))]
 adc_pins!(
-    gpiof::PF6<Analog> => (ADC3, 4),
-    gpiof::PF7<Analog> => (ADC3, 5),
-    gpiof::PF8<Analog> => (ADC3, 6),
-    gpiof::PF9<Analog> => (ADC3, 7),
+    gpio::PF6<Analog> => (ADC3, 4),
+    gpio::PF7<Analog> => (ADC3, 5),
+    gpio::PF8<Analog> => (ADC3, 6),
+    gpio::PF9<Analog> => (ADC3, 7),
 );
 
 #[cfg(any(feature = "stm32f429", feature = "stm32f439"))]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA0<Analog> => (ADC2, 0),
-    gpioa::PA0<Analog> => (ADC3, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA1<Analog> => (ADC2, 1),
-    gpioa::PA1<Analog> => (ADC3, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA2<Analog> => (ADC2, 2),
-    gpioa::PA2<Analog> => (ADC3, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA3<Analog> => (ADC2, 3),
-    gpioa::PA3<Analog> => (ADC3, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA4<Analog> => (ADC2, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA5<Analog> => (ADC2, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA6<Analog> => (ADC2, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpioa::PA7<Analog> => (ADC2, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB0<Analog> => (ADC2, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpiob::PB1<Analog> => (ADC2, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC0<Analog> => (ADC2, 10),
-    gpioc::PC0<Analog> => (ADC3, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC1<Analog> => (ADC2, 11),
-    gpioc::PC1<Analog> => (ADC3, 11),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC2<Analog> => (ADC2, 12),
-    gpioc::PC2<Analog> => (ADC3, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC3<Analog> => (ADC2, 13),
-    gpioc::PC3<Analog> => (ADC3, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC4<Analog> => (ADC2, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
-    gpioc::PC5<Analog> => (ADC2, 15),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA0<Analog> => (ADC2, 0),
+    gpio::PA0<Analog> => (ADC3, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA1<Analog> => (ADC2, 1),
+    gpio::PA1<Analog> => (ADC3, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA2<Analog> => (ADC2, 2),
+    gpio::PA2<Analog> => (ADC3, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA3<Analog> => (ADC2, 3),
+    gpio::PA3<Analog> => (ADC3, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA4<Analog> => (ADC2, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA5<Analog> => (ADC2, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA6<Analog> => (ADC2, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PA7<Analog> => (ADC2, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB0<Analog> => (ADC2, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PB1<Analog> => (ADC2, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC0<Analog> => (ADC2, 10),
+    gpio::PC0<Analog> => (ADC3, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC1<Analog> => (ADC2, 11),
+    gpio::PC1<Analog> => (ADC3, 11),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC2<Analog> => (ADC2, 12),
+    gpio::PC2<Analog> => (ADC3, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC3<Analog> => (ADC2, 13),
+    gpio::PC3<Analog> => (ADC3, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC4<Analog> => (ADC2, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
+    gpio::PC5<Analog> => (ADC2, 15),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1435,58 +1493,58 @@ adc_pins!(
 // Not available on V variant
 #[cfg(any(feature = "stm32f429", feature = "stm32f439"))]
 adc_pins!(
-    gpiof::PF10<Analog> => (ADC3, 8),
-    gpiof::PF3<Analog> => (ADC3, 9),
-    gpiof::PF4<Analog> => (ADC3, 14),
-    gpiof::PF5<Analog> => (ADC3, 15),
+    gpio::PF10<Analog> => (ADC3, 8),
+    gpio::PF3<Analog> => (ADC3, 9),
+    gpio::PF4<Analog> => (ADC3, 14),
+    gpio::PF5<Analog> => (ADC3, 15),
 );
 
 // Not available on V or A variants
 #[cfg(any(feature = "stm32f429", feature = "stm32f439"))]
 adc_pins!(
-    gpiof::PF6<Analog> => (ADC3, 4),
-    gpiof::PF7<Analog> => (ADC3, 5),
-    gpiof::PF8<Analog> => (ADC3, 6),
-    gpiof::PF9<Analog> => (ADC3, 7),
+    gpio::PF6<Analog> => (ADC3, 4),
+    gpio::PF7<Analog> => (ADC3, 5),
+    gpio::PF8<Analog> => (ADC3, 6),
+    gpio::PF9<Analog> => (ADC3, 7),
 );
 
 #[cfg(feature = "stm32f446")]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA0<Analog> => (ADC2, 0),
-    gpioa::PA0<Analog> => (ADC3, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA1<Analog> => (ADC2, 1),
-    gpioa::PA1<Analog> => (ADC3, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA2<Analog> => (ADC2, 2),
-    gpioa::PA2<Analog> => (ADC3, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA3<Analog> => (ADC2, 3),
-    gpioa::PA3<Analog> => (ADC3, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA4<Analog> => (ADC2, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA5<Analog> => (ADC2, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA6<Analog> => (ADC2, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpioa::PA7<Analog> => (ADC2, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB0<Analog> => (ADC2, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpiob::PB1<Analog> => (ADC2, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC0<Analog> => (ADC2, 10),
-    gpioc::PC0<Analog> => (ADC3, 10),
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC2<Analog> => (ADC2, 12),
-    gpioc::PC2<Analog> => (ADC3, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC3<Analog> => (ADC2, 13),
-    gpioc::PC3<Analog> => (ADC3, 13),
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC4<Analog> => (ADC2, 14),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA0<Analog> => (ADC2, 0),
+    gpio::PA0<Analog> => (ADC3, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA1<Analog> => (ADC2, 1),
+    gpio::PA1<Analog> => (ADC3, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA2<Analog> => (ADC2, 2),
+    gpio::PA2<Analog> => (ADC3, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA3<Analog> => (ADC2, 3),
+    gpio::PA3<Analog> => (ADC3, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA4<Analog> => (ADC2, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA5<Analog> => (ADC2, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA6<Analog> => (ADC2, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PA7<Analog> => (ADC2, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB0<Analog> => (ADC2, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PB1<Analog> => (ADC2, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC0<Analog> => (ADC2, 10),
+    gpio::PC0<Analog> => (ADC3, 10),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC2<Analog> => (ADC2, 12),
+    gpio::PC2<Analog> => (ADC3, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC3<Analog> => (ADC2, 13),
+    gpio::PC3<Analog> => (ADC3, 13),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC4<Analog> => (ADC2, 14),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1495,59 +1553,59 @@ adc_pins!(
 // Not available on M variant
 #[cfg(feature = "stm32f446")]
 adc_pins!(
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC1<Analog> => (ADC2, 11),
-    gpioc::PC1<Analog> => (ADC3, 11),
-    gpioc::PC5<Analog> => (ADC1, 15),
-    gpioc::PC5<Analog> => (ADC2, 15),
-    gpioc::PC5<Analog> => (ADC3, 15),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC1<Analog> => (ADC2, 11),
+    gpio::PC1<Analog> => (ADC3, 11),
+    gpio::PC5<Analog> => (ADC1, 15),
+    gpio::PC5<Analog> => (ADC2, 15),
+    gpio::PC5<Analog> => (ADC3, 15),
 );
 
 // Only available on Z variant
 #[cfg(feature = "stm32f446")]
 adc_pins!(
-    gpiof::PF10<Analog> => (ADC3, 8),
-    gpiof::PF3<Analog> => (ADC3, 9),
-    gpiof::PF4<Analog> => (ADC3, 14),
-    gpiof::PF5<Analog> => (ADC3, 15),
-    gpiof::PF6<Analog> => (ADC3, 4),
-    gpiof::PF7<Analog> => (ADC3, 5),
-    gpiof::PF8<Analog> => (ADC3, 6),
-    gpiof::PF9<Analog> => (ADC3, 7),
+    gpio::PF10<Analog> => (ADC3, 8),
+    gpio::PF3<Analog> => (ADC3, 9),
+    gpio::PF4<Analog> => (ADC3, 14),
+    gpio::PF5<Analog> => (ADC3, 15),
+    gpio::PF6<Analog> => (ADC3, 4),
+    gpio::PF7<Analog> => (ADC3, 5),
+    gpio::PF8<Analog> => (ADC3, 6),
+    gpio::PF9<Analog> => (ADC3, 7),
 );
 
 #[cfg(any(feature = "stm32f469", feature = "stm32f479"))]
 adc_pins!(
-    gpioa::PA0<Analog> => (ADC1, 0),
-    gpioa::PA0<Analog> => (ADC2, 0),
-    gpioa::PA0<Analog> => (ADC3, 0),
-    gpioa::PA1<Analog> => (ADC1, 1),
-    gpioa::PA1<Analog> => (ADC2, 1),
-    gpioa::PA1<Analog> => (ADC3, 1),
-    gpioa::PA2<Analog> => (ADC1, 2),
-    gpioa::PA2<Analog> => (ADC2, 2),
-    gpioa::PA2<Analog> => (ADC3, 2),
-    gpioa::PA3<Analog> => (ADC1, 3),
-    gpioa::PA3<Analog> => (ADC2, 3),
-    gpioa::PA3<Analog> => (ADC3, 3),
-    gpioa::PA4<Analog> => (ADC1, 4),
-    gpioa::PA4<Analog> => (ADC2, 4),
-    gpioa::PA5<Analog> => (ADC1, 5),
-    gpioa::PA5<Analog> => (ADC2, 5),
-    gpioa::PA6<Analog> => (ADC1, 6),
-    gpioa::PA6<Analog> => (ADC2, 6),
-    gpioa::PA7<Analog> => (ADC1, 7),
-    gpioa::PA7<Analog> => (ADC2, 7),
-    gpiob::PB0<Analog> => (ADC1, 8),
-    gpiob::PB0<Analog> => (ADC2, 8),
-    gpiob::PB1<Analog> => (ADC1, 9),
-    gpiob::PB1<Analog> => (ADC2, 9),
-    gpioc::PC0<Analog> => (ADC1, 10),
-    gpioc::PC0<Analog> => (ADC2, 10),
-    gpioc::PC0<Analog> => (ADC3, 10),
-    gpioc::PC1<Analog> => (ADC1, 11),
-    gpioc::PC1<Analog> => (ADC2, 11),
-    gpioc::PC1<Analog> => (ADC3, 11),
+    gpio::PA0<Analog> => (ADC1, 0),
+    gpio::PA0<Analog> => (ADC2, 0),
+    gpio::PA0<Analog> => (ADC3, 0),
+    gpio::PA1<Analog> => (ADC1, 1),
+    gpio::PA1<Analog> => (ADC2, 1),
+    gpio::PA1<Analog> => (ADC3, 1),
+    gpio::PA2<Analog> => (ADC1, 2),
+    gpio::PA2<Analog> => (ADC2, 2),
+    gpio::PA2<Analog> => (ADC3, 2),
+    gpio::PA3<Analog> => (ADC1, 3),
+    gpio::PA3<Analog> => (ADC2, 3),
+    gpio::PA3<Analog> => (ADC3, 3),
+    gpio::PA4<Analog> => (ADC1, 4),
+    gpio::PA4<Analog> => (ADC2, 4),
+    gpio::PA5<Analog> => (ADC1, 5),
+    gpio::PA5<Analog> => (ADC2, 5),
+    gpio::PA6<Analog> => (ADC1, 6),
+    gpio::PA6<Analog> => (ADC2, 6),
+    gpio::PA7<Analog> => (ADC1, 7),
+    gpio::PA7<Analog> => (ADC2, 7),
+    gpio::PB0<Analog> => (ADC1, 8),
+    gpio::PB0<Analog> => (ADC2, 8),
+    gpio::PB1<Analog> => (ADC1, 9),
+    gpio::PB1<Analog> => (ADC2, 9),
+    gpio::PC0<Analog> => (ADC1, 10),
+    gpio::PC0<Analog> => (ADC2, 10),
+    gpio::PC0<Analog> => (ADC3, 10),
+    gpio::PC1<Analog> => (ADC1, 11),
+    gpio::PC1<Analog> => (ADC2, 11),
+    gpio::PC1<Analog> => (ADC3, 11),
     Temperature => (ADC1, 18),
     Vbat => (ADC1, 18),
     Vref => (ADC1, 17),
@@ -1556,37 +1614,37 @@ adc_pins!(
 // Not available on A variant
 #[cfg(any(feature = "stm32f469", feature = "stm32f479"))]
 adc_pins!(
-    gpioc::PC2<Analog> => (ADC1, 12),
-    gpioc::PC2<Analog> => (ADC2, 12),
-    gpioc::PC2<Analog> => (ADC3, 12),
-    gpioc::PC3<Analog> => (ADC1, 13),
-    gpioc::PC3<Analog> => (ADC2, 13),
-    gpioc::PC3<Analog> => (ADC3, 13),
+    gpio::PC2<Analog> => (ADC1, 12),
+    gpio::PC2<Analog> => (ADC2, 12),
+    gpio::PC2<Analog> => (ADC3, 12),
+    gpio::PC3<Analog> => (ADC1, 13),
+    gpio::PC3<Analog> => (ADC2, 13),
+    gpio::PC3<Analog> => (ADC3, 13),
 );
 
 // Not available on V or A variants
 #[cfg(any(feature = "stm32f469", feature = "stm32f479"))]
 adc_pins!(
-    gpioc::PC4<Analog> => (ADC1, 14),
-    gpioc::PC4<Analog> => (ADC2, 14),
-    gpioc::PC5<Analog> => (ADC1, 15),
-    gpioc::PC5<Analog> => (ADC2, 15),
+    gpio::PC4<Analog> => (ADC1, 14),
+    gpio::PC4<Analog> => (ADC2, 14),
+    gpio::PC5<Analog> => (ADC1, 15),
+    gpio::PC5<Analog> => (ADC2, 15),
 );
 
 // Not available on V variant
 #[cfg(any(feature = "stm32f469", feature = "stm32f479"))]
 adc_pins!(
-    gpiof::PF10<Analog> => (ADC3, 8),
-    gpiof::PF3<Analog> => (ADC3, 9),
-    gpiof::PF4<Analog> => (ADC3, 14),
-    gpiof::PF5<Analog> => (ADC3, 15),
+    gpio::PF10<Analog> => (ADC3, 8),
+    gpio::PF3<Analog> => (ADC3, 9),
+    gpio::PF4<Analog> => (ADC3, 14),
+    gpio::PF5<Analog> => (ADC3, 15),
 );
 
 // Only available on B/I/N variants
 #[cfg(any(feature = "stm32f469", feature = "stm32f479"))]
 adc_pins!(
-    gpiof::PF6<Analog> => (ADC3, 4),
-    gpiof::PF7<Analog> => (ADC3, 5),
-    gpiof::PF8<Analog> => (ADC3, 6),
-    gpiof::PF9<Analog> => (ADC3, 7),
+    gpio::PF6<Analog> => (ADC3, 4),
+    gpio::PF7<Analog> => (ADC3, 5),
+    gpio::PF8<Analog> => (ADC3, 6),
+    gpio::PF9<Analog> => (ADC3, 7),
 );
